@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "rule_id": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "sentry_type": {
+      "type": "string",
+      "enum": [
+        "FINANCIAL_TECHNICAL",
+        "ECOMMERCE_INVENTORY",
+        "WEB_OBSERVER",
+        "STREAM_INTELLIGENCE"
+      ]
+    },
+    "target_source": {
+      "type": "string",
+      "minLength": 1
+    },
+    "operator": {
+      "type": "string",
+      "enum": [
+        "GREATER_THAN",
+        "LESS_THAN",
+        "CROSSES_ABOVE",
+        "CROSSES_BELOW",
+        "EQUALS",
+        "KEYWORD_MATCH",
+        "STATE_FLIP",
+        "HASH_DELTA"
+      ]
+    },
+    "threshold": {
+      "type": "string"
+    },
+    "ttl_seconds": {
+      "default": 300,
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "last_evaluated_at": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "last_triggered_at": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "is_satisfied": {
+      "default": 0,
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "satisfied_at": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "state_payload": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "health_status": {
+      "default": "HEALTHY",
+      "type": "string",
+      "enum": [
+        "HEALTHY",
+        "DEGRADED",
+        "ERROR"
+      ]
+    },
+    "error_count": {
+      "default": 0,
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "last_error": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "id",
+    "rule_id",
+    "sentry_type",
+    "target_source",
+    "operator",
+    "threshold",
+    "ttl_seconds",
+    "is_satisfied",
+    "health_status",
+    "error_count"
+  ],
+  "additionalProperties": false
+}

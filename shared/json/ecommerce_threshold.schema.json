@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "price": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "currency": {
+      "default": "USD",
+      "type": "string"
+    },
+    "checkInStock": {
+      "default": true,
+      "type": "boolean"
+    },
+    "seller": {
+      "type": "string"
+    },
+    "minDiscountPercent": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100
+    }
+  },
+  "required": [
+    "currency",
+    "checkInStock"
+  ],
+  "additionalProperties": false
+}

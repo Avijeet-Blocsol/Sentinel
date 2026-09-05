@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "selector": {
+      "type": "string"
+    },
+    "attribute": {
+      "default": "text",
+      "type": "string"
+    },
+    "expectedText": {
+      "type": "string"
+    },
+    "regex": {
+      "type": "string"
+    },
+    "hashType": {
+      "type": "string",
+      "enum": [
+        "SHA256",
+        "DOM_STRUCTURE"
+      ]
+    },
+    "targetValue": {
+      "type": [
+        "string",
+        "number"
+      ]
+    }
+  },
+  "required": [
+    "attribute"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "actionType": {
+      "type": "string",
+      "enum": [
+        "LIMIT_BUY_ORDER",
+        "MARKET_ORDER",
+        "WEBHOOK_POST",
+        "EMAIL_DISPATCH",
+        "DISCORD_MESSAGE"
+      ]
+    },
+    "target": {
+      "type": "string"
+    },
+    "parameters": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {}
+    },
+    "reversible": {
+      "default": false,
+      "type": "boolean"
+    },
+    "estimatedImpact": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "actionType",
+    "target",
+    "parameters",
+    "reversible"
+  ],
+  "additionalProperties": false
+}

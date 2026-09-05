@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "indicator": {
+      "type": "string",
+      "enum": [
+        "RSI",
+        "MACD",
+        "SMA",
+        "EMA",
+        "BOLLINGER",
+        "PRICE"
+      ]
+    },
+    "period": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "timeframe": {
+      "default": "1h",
+      "type": "string",
+      "enum": [
+        "1m",
+        "5m",
+        "15m",
+        "1h",
+        "4h",
+        "1d"
+      ]
+    },
+    "value": {
+      "type": "number"
+    },
+    "fastPeriod": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "slowPeriod": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "signalPeriod": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    }
+  },
+  "required": [
+    "indicator",
+    "timeframe",
+    "value"
+  ],
+  "additionalProperties": false
+}

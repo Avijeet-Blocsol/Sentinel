@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "sourceType": {
+      "type": "string",
+      "enum": [
+        "REDDIT",
+        "TELEGRAM",
+        "DISCORD",
+        "RSS_NEWS",
+        "GOVT_TENDER"
+      ]
+    },
+    "keywords": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "matchMode": {
+      "default": "ANY",
+      "type": "string",
+      "enum": [
+        "ANY",
+        "ALL",
+        "EXACT"
+      ]
+    },
+    "semanticFilter": {
+      "type": "string"
+    },
+    "minUpvotes": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "authorFilter": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "sourceType",
+    "keywords",
+    "matchMode"
+  ],
+  "additionalProperties": false
+}

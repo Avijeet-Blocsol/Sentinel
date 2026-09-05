@@ -1,0 +1,11 @@
+{
+  "name": "sentinel-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "generate:schemas": "tsx shared/scripts/generate_schemas.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.1"
+  }
+}
