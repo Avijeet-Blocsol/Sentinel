@@ -6,7 +6,7 @@ import {
   conversationRepository,
   chatMessageRepository,
   ruleRepository,
-  subSentryRepository,
+  subSentinelRepository,
   seenEventRepository,
   telemetryRepository,
   alertEventRepository,
@@ -16,7 +16,7 @@ import {
   AgentConversation,
   ChatMessage,
   Rule,
-  SubSentry,
+  SubSentinel,
   AlertEvent,
   InterruptAction,
 } from '../src/db/index.js';
@@ -89,6 +89,7 @@ try {
     id: 'e0eebc99-9c0b-4ef8-bb6d-6bb9bd380a55',
     user_id: user.id,
     conversation_id: convo.id,
+    title: 'Database Test Rule',
     natural_language_intent: msg.content,
     combinator: 'AND',
     trigger_mode: 'PERSISTENT',
@@ -102,11 +103,11 @@ try {
   const activeRules = ruleRepository.getActiveRules();
   console.log('5. Rule Creation & Retrieval:', activeRules.some(r => r.id === rule.id) ? 'PASS' : 'FAIL');
 
-  // 6. Sub-Sentry
-  const sentry: SubSentry = {
+  // 6. Sub-Sentinel
+  const sentinel: SubSentinel = {
     id: 'f0eebc99-9c0b-4ef8-bb6d-6bb9bd380a66',
     rule_id: rule.id,
-    sentry_type: 'FINANCIAL_TECHNICAL',
+    sentinel_type: 'FINANCIAL_TECHNICAL',
     target_source: 'BTC/USD',
     operator: 'LESS_THAN',
     threshold: JSON.stringify({ indicator: 'RSI', period: 14, timeframe: '1h', value: 30 }),
@@ -115,20 +116,20 @@ try {
     health_status: 'HEALTHY',
     error_count: 0,
   };
-  subSentryRepository.create(sentry);
-  subSentryRepository.updateSatisfaction(sentry.id, true, JSON.stringify({ currentValue: 28.2, sourceTimestamp: Date.now() }));
-  const fetchedSentry = subSentryRepository.getByRuleId(rule.id)[0];
-  console.log('6. Sub-Sentry Satisfaction State:', fetchedSentry.is_satisfied === 1 && fetchedSentry.health_status === 'HEALTHY' ? 'PASS' : 'FAIL');
+  subSentinelRepository.create(sentinel);
+  subSentinelRepository.updateSatisfaction(sentinel.id, true, JSON.stringify({ currentValue: 28.2, sourceTimestamp: Date.now() }));
+  const fetchedSentinel = subSentinelRepository.getByRuleId(rule.id)[0];
+  console.log('6. Sub-Sentinel Satisfaction State:', fetchedSentinel.is_satisfied === 1 && fetchedSentinel.health_status === 'HEALTHY' ? 'PASS' : 'FAIL');
 
   // 7. Seen Events
-  seenEventRepository.recordSeenEvent('sha256-hash-evt-1', sentry.id, 'binance:ws', 'sha256-hash-evt-1');
-  console.log('7. Seen Events Deduplication:', seenEventRepository.isEventSeen(sentry.id, 'sha256-hash-evt-1') ? 'PASS' : 'FAIL');
+  seenEventRepository.recordSeenEvent('sha256-hash-evt-1', sentinel.id, 'binance:ws', 'sha256-hash-evt-1');
+  console.log('7. Seen Events Deduplication:', seenEventRepository.isEventSeen(sentinel.id, 'sha256-hash-evt-1') ? 'PASS' : 'FAIL');
 
   // 8. Telemetry Points
   telemetryRepository.log({
     id: '10eebc99-9c0b-4ef8-bb6d-6bb9bd380a77',
     rule_id: rule.id,
-    sentry_id: sentry.id,
+    sub_sentinel_id: sentinel.id,
     metric_name: 'rsi',
     value: 28.2,
     timestamp: Date.now(),

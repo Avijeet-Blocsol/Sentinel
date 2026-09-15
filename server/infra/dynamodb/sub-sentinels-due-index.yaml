@@ -1,0 +1,47 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Sub-sentinel table shape required by the durable due-time scheduler.
+
+Parameters:
+  TableName:
+    Type: String
+    Default: sentinel_sub_sentinels
+
+Resources:
+  SubSentinelsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Ref TableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: rule_id
+          AttributeType: S
+        - AttributeName: schedule_shard
+          AttributeType: S
+        - AttributeName: next_evaluation_at
+          AttributeType: N
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: idx_rule_id
+          KeySchema:
+            - AttributeName: rule_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: idx_due_schedule
+          KeySchema:
+            - AttributeName: schedule_shard
+              KeyType: HASH
+            - AttributeName: next_evaluation_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+Outputs:
+  SubSentinelsTableName:
+    Value: !Ref SubSentinelsTable
+  DueScheduleIndexName:
+    Value: idx_due_schedule

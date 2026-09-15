@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "feedUrl": {
+      "type": "string",
+      "format": "uri"
+    },
+    "keywords": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "matchMode": {
+      "default": "ANY",
+      "type": "string",
+      "enum": [
+        "ANY",
+        "ALL",
+        "EXACT"
+      ]
+    },
+    "authorFilter": {
+      "type": "string"
+    },
+    "semanticFilter": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "feedUrl",
+    "keywords",
+    "matchMode"
+  ],
+  "additionalProperties": false
+}

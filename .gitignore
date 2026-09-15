@@ -1,0 +1,29 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+
+# Generated dependencies and build output
+node_modules/
+dist/
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+
+# Mobile signing material and local tooling
+*.jks
+*.keystore
+*.p8
+*.p12
+*.key
+*.mobileprovision
+.expo/
+.strands/
+
+# Logs and OS files
+*.log
+.DS_Store
+npm-debug.*
+yarn-debug.*
+yarn-error.*

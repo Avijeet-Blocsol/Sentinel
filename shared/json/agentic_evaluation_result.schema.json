@@ -1,0 +1,192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "conditionSatisfied": {
+      "type": "boolean",
+      "description": "Whether the condition requested by the user is satisfied by the observed data"
+    },
+    "confidenceScore": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Confidence score between 0.0 and 1.0"
+    },
+    "reasoning": {
+      "type": "string",
+      "description": "Clear, concise explanation of why the condition is or is not satisfied based on evidence"
+    },
+    "observedEvidence": {
+      "type": "object",
+      "properties": {
+        "sourceTitle": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sourceUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "relevantSnippet": {
+          "type": "string",
+          "description": "Direct quote, metric, or snippet serving as proof"
+        },
+        "extractedValue": {
+          "type": [
+            "string",
+            "number",
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "relevantSnippet"
+      ],
+      "additionalProperties": false
+    },
+    "suggestedAlert": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string",
+              "description": "Impactful push notification title"
+            },
+            "summary": {
+              "type": "string",
+              "description": "Concise 1-2 sentence alert summary"
+            },
+            "severity": {
+              "default": "MEDIUM",
+              "type": "string",
+              "enum": [
+                "LOW",
+                "MEDIUM",
+                "HIGH",
+                "CRITICAL"
+              ]
+            },
+            "audioTone": {
+              "default": "chime",
+              "type": "string",
+              "enum": [
+                "cash_register",
+                "siren",
+                "chime"
+              ]
+            }
+          },
+          "required": [
+            "title",
+            "summary",
+            "severity",
+            "audioTone"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "suggestedAction": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "actionType": {
+              "type": "string",
+              "enum": [
+                "LIMIT_BUY_ORDER",
+                "MARKET_ORDER",
+                "WEBHOOK_POST",
+                "EMAIL_DISPATCH",
+                "DISCORD_MESSAGE"
+              ]
+            },
+            "target": {
+              "type": "string",
+              "minLength": 1
+            },
+            "parameters": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
+            },
+            "requiresHumanApproval": {
+              "default": true,
+              "type": "boolean",
+              "const": true
+            },
+            "description": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "actionType",
+            "target",
+            "parameters",
+            "requiresHumanApproval",
+            "description"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "error": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "status": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "MATCH",
+            "NO_MATCH",
+            "ERROR"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "matchedIndices": {
+      "description": "0-based indices of candidate items in observedContext that specifically satisfied the condition",
+      "anyOf": [
+        {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "conditionSatisfied",
+    "confidenceScore",
+    "reasoning",
+    "observedEvidence"
+  ],
+  "additionalProperties": false
+}

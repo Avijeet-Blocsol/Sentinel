@@ -1,24 +1,44 @@
 {
   "expo": {
-    "name": "Strands Sentinel",
-    "slug": "strands-sentinel",
+    "name": "Sentinel",
+    "slug": "sentinel",
+    "scheme": "sentinel",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    "icon": "./assets/images/icon.png",
     "userInterfaceStyle": "dark",
-    "splash": {
-      "backgroundColor": "#09090b"
-    },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.sentinel.network"
     },
     "android": {
+      "package": "com.sentinel.network",
+      "softwareKeyboardLayoutMode": "resize",
       "adaptiveIcon": {
-        "backgroundColor": "#09090b"
+        "foregroundImage": "./assets/images/adaptive-icon.png",
+        "backgroundColor": "#050505"
       }
     },
     "web": {
+      "favicon": "./assets/images/favicon.png",
       "bundler": "metro"
-    }
+    },
+    "plugins": [
+      "@clerk/expo",
+      "expo-secure-store",
+      "expo-web-browser",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/splash.png",
+          "resizeMode": "contain",
+          "backgroundColor": "#050505",
+          "imageWidth": 200
+        }
+      ],
+      "expo-audio",
+      "expo-asset",
+      "expo-notifications"
+    ]
   }
 }

@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "venue": {
+      "default": "POLYMARKET",
+      "type": "string",
+      "const": "POLYMARKET"
+    },
+    "conditionId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "clobTokenId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "outcome": {
+      "type": "string",
+      "minLength": 1
+    },
+    "targetProbability": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "marketTitle": {
+      "default": "Prediction Market",
+      "type": "string",
+      "minLength": 1
+    },
+    "resolutionDate": {
+      "type": "string"
+    },
+    "priceType": {
+      "default": "MIDPOINT",
+      "type": "string",
+      "enum": [
+        "MIDPOINT",
+        "LAST_TRADE",
+        "GAMMA_PRICE"
+      ]
+    },
+    "operator": {
+      "type": "string",
+      "enum": [
+        "GREATER_THAN",
+        "LESS_THAN",
+        "CROSSES_ABOVE",
+        "CROSSES_BELOW",
+        "TOUCHES",
+        "CLOSES_ABOVE",
+        "CLOSES_BELOW",
+        "EQUALS",
+        "KEYWORD_MATCH",
+        "STATE_FLIP",
+        "HASH_DELTA",
+        "SEMANTIC_MATCH",
+        "PERCENT_CHANGE"
+      ]
+    },
+    "observedProbability": {
+      "type": "number"
+    },
+    "conditionSatisfied": {
+      "type": "boolean"
+    },
+    "evaluationDetails": {
+      "type": "string"
+    },
+    "conditionEvaluation": {
+      "type": "object",
+      "properties": {
+        "expectedOperator": {
+          "type": "string",
+          "enum": [
+            "GREATER_THAN",
+            "LESS_THAN",
+            "CROSSES_ABOVE",
+            "CROSSES_BELOW",
+            "TOUCHES",
+            "CLOSES_ABOVE",
+            "CLOSES_BELOW",
+            "EQUALS",
+            "KEYWORD_MATCH",
+            "STATE_FLIP",
+            "HASH_DELTA",
+            "SEMANTIC_MATCH",
+            "PERCENT_CHANGE"
+          ]
+        },
+        "targetValue": {
+          "type": "number"
+        },
+        "observedValue": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "conditionSatisfied": {
+          "type": "boolean"
+        },
+        "evaluationDetails": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expectedOperator",
+        "conditionSatisfied",
+        "evaluationDetails"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "venue",
+    "conditionId",
+    "outcome",
+    "targetProbability",
+    "marketTitle",
+    "priceType"
+  ],
+  "additionalProperties": false
+}

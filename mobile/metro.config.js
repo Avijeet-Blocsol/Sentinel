@@ -5,4 +5,4 @@ const path = require("path");
 const config = getDefaultConfig(__dirname);
 config.watchFolders = [path.resolve(__dirname, "../shared")];
 
-module.exports = withNativeWind(config, { input: "./global.css" });
+module.exports = withNativeWind(config, { input: "./global.css", inlineRem: 16 });

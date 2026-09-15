@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "assetSymbol": {
+      "type": "string",
+      "minLength": 1
+    },
+    "currency": {
+      "default": "USD",
+      "type": "string"
+    },
+    "venue": {
+      "default": "COINBASE",
+      "type": "string",
+      "enum": [
+        "COINBASE",
+        "DEXSCREENER"
+      ]
+    },
+    "dexContractAddress": {
+      "type": "string"
+    },
+    "dexNetwork": {
+      "type": "string"
+    },
+    "targetType": {
+      "default": "PRICE",
+      "type": "string",
+      "enum": [
+        "PRICE",
+        "INDICATOR",
+        "CANDLESTICK"
+      ]
+    },
+    "indicator": {
+      "type": "string",
+      "enum": [
+        "SMA",
+        "EMA",
+        "WMA",
+        "WEMA",
+        "RSI",
+        "MACD",
+        "BOLLINGER_BANDS",
+        "BOLLINGER",
+        "KELTNER_CHANNELS",
+        "STOCHASTIC",
+        "STOCHASTIC_RSI",
+        "CCI",
+        "ATR",
+        "ADX",
+        "ROC",
+        "AWESOME_OSCILLATOR",
+        "TRIX",
+        "WILLIAMS_R",
+        "VOLUME",
+        "OBV",
+        "MFI",
+        "VWAP",
+        "PSAR",
+        "ICHIMOKU_CLOUD",
+        "PRICE"
+      ]
+    },
+    "candlestickPattern": {
+      "type": "string",
+      "enum": [
+        "BULLISH_ENGULFING",
+        "BULLISH_HAMMER",
+        "BULLISH_INVERTED_HAMMER",
+        "BULLISH_HARAMI",
+        "BULLISH_HARAMI_CROSS",
+        "BULLISH_MARUBOZU",
+        "MORNING_STAR",
+        "MORNING_DOJI_STAR",
+        "DRAGONFLY_DOJI",
+        "BEARISH_ENGULFING",
+        "BEARISH_HAMMER",
+        "BEARISH_INVERTED_HAMMER",
+        "BEARISH_HARAMI",
+        "BEARISH_HARAMI_CROSS",
+        "BEARISH_MARUBOZU",
+        "EVENING_STAR",
+        "EVENING_DOJI_STAR",
+        "GRAVESTONE_DOJI",
+        "DARK_CLOUD_COVER",
+        "SHOOTING_STAR",
+        "DOJI"
+      ]
+    },
+    "period": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "timeframe": {
+      "default": "1h",
+      "type": "string",
+      "enum": [
+        "1m",
+        "5m",
+        "15m",
+        "30m",
+        "1h",
+        "4h",
+        "1d",
+        "1w"
+      ]
+    },
+    "targetValue": {
+      "type": "number"
+    },
+    "fastPeriod": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "slowPeriod": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "signalPeriod": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "operator": {
+      "type": "string",
+      "enum": [
+        "GREATER_THAN",
+        "LESS_THAN",
+        "CROSSES_ABOVE",
+        "CROSSES_BELOW",
+        "TOUCHES",
+        "CLOSES_ABOVE",
+        "CLOSES_BELOW",
+        "EQUALS",
+        "KEYWORD_MATCH",
+        "STATE_FLIP",
+        "HASH_DELTA",
+        "SEMANTIC_MATCH",
+        "PERCENT_CHANGE"
+      ]
+    },
+    "observedValue": {
+      "type": "number"
+    },
+    "conditionSatisfied": {
+      "type": "boolean"
+    },
+    "evaluationDetails": {
+      "type": "string"
+    },
+    "conditionEvaluation": {
+      "type": "object",
+      "properties": {
+        "expectedOperator": {
+          "type": "string",
+          "enum": [
+            "GREATER_THAN",
+            "LESS_THAN",
+            "CROSSES_ABOVE",
+            "CROSSES_BELOW",
+            "TOUCHES",
+            "CLOSES_ABOVE",
+            "CLOSES_BELOW",
+            "EQUALS",
+            "KEYWORD_MATCH",
+            "STATE_FLIP",
+            "HASH_DELTA",
+            "SEMANTIC_MATCH",
+            "PERCENT_CHANGE"
+          ]
+        },
+        "targetValue": {
+          "type": "number"
+        },
+        "observedValue": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "conditionSatisfied": {
+          "type": "boolean"
+        },
+        "evaluationDetails": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expectedOperator",
+        "conditionSatisfied",
+        "evaluationDetails"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "assetSymbol",
+    "currency",
+    "venue",
+    "targetType",
+    "timeframe"
+  ],
+  "additionalProperties": false
+}

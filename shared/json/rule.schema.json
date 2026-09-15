@@ -9,8 +9,7 @@
     },
     "user_id": {
       "type": "string",
-      "format": "uuid",
-      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+      "minLength": 1
     },
     "conversation_id": {
       "anyOf": [
@@ -24,9 +23,27 @@
         }
       ]
     },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
     "natural_language_intent": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "maxLength": 4000
+    },
+    "category": {
+      "default": "FINANCIAL",
+      "type": "string",
+      "enum": [
+        "FINANCIAL",
+        "CRYPTO",
+        "PREDICTION_MARKET",
+        "WEB_INTEL",
+        "SOCIAL_STREAM",
+        "ECOMMERCE"
+      ]
     },
     "combinator": {
       "type": "string",
@@ -34,6 +51,17 @@
         "AND",
         "OR",
         "SINGLE"
+      ]
+    },
+    "condition_tree": {
+      "anyOf": [
+        {
+          "type": "string",
+          "maxLength": 32000
+        },
+        {
+          "type": "null"
+        }
       ]
     },
     "trigger_mode": {
@@ -68,6 +96,41 @@
         "ARCHIVED"
       ]
     },
+    "expires_at": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "last_triggered_at": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "action_template": {
+      "anyOf": [
+        {
+          "type": "string",
+          "maxLength": 16000
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "created_at": {
       "type": "integer",
       "minimum": -9007199254740991,
@@ -82,7 +145,9 @@
   "required": [
     "id",
     "user_id",
+    "title",
     "natural_language_intent",
+    "category",
     "combinator",
     "trigger_mode",
     "cooldown_minutes",

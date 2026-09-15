@@ -1,3 +1,51 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 2%;
+    --foreground: 0 0% 100%;
+    --card: 215 28% 7%;
+    --card-foreground: 0 0% 100%;
+    --popover: 215 28% 7%;
+    --popover-foreground: 0 0% 100%;
+    --primary: 146 90% 50%;
+    --primary-foreground: 0 0% 2%;
+    --secondary: 215 21% 11%;
+    --secondary-foreground: 0 0% 100%;
+    --muted: 215 21% 11%;
+    --muted-foreground: 215 10% 58%;
+    --accent: 146 62% 9%;
+    --accent-foreground: 146 90% 50%;
+    --destructive: 348 100% 58%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 215 17% 15%;
+    --input: 215 17% 15%;
+    --ring: 146 90% 50%;
+  }
+}
+
+/* Completely hide all scrollbars and scroll container tracks across all browsers and engines while keeping smooth scrolling */
+* {
+  -ms-overflow-style: none !important;
+  scrollbar-width: none !important;
+}
+
+*::-webkit-scrollbar {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+  background: transparent !important;
+}
+
+/* Prevent yellow autofill background in browsers and web engines */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus,
+input:-webkit-autofill:active {
+  -webkit-box-shadow: 0 0 0 1000px #0e121b inset !important;
+  -webkit-text-fill-color: #ffffff !important;
+  caret-color: #0DF272 !important;
+  transition: background-color 5000s ease-in-out 0s;
+}

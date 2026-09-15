@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "channelHandle": {
+      "type": "string",
+      "minLength": 1
+    },
+    "keywords": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "matchMode": {
+      "default": "ANY",
+      "type": "string",
+      "enum": [
+        "ANY",
+        "ALL",
+        "EXACT"
+      ]
+    },
+    "minViews": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "mediaOnly": {
+      "default": false,
+      "type": "boolean"
+    },
+    "semanticFilter": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "channelHandle",
+    "keywords",
+    "matchMode",
+    "mediaOnly"
+  ],
+  "additionalProperties": false
+}

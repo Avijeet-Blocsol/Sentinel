@@ -12,18 +12,24 @@
       "format": "uuid",
       "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
     },
-    "sentry_type": {
+    "sentinel_type": {
       "type": "string",
       "enum": [
+        "STOCK",
+        "CRYPTO",
+        "PREDICTION_MARKET",
+        "WEB_OBSERVER",
+        "TELEGRAM_CHANNEL",
+        "RSS_FEED",
         "FINANCIAL_TECHNICAL",
         "ECOMMERCE_INVENTORY",
-        "WEB_OBSERVER",
         "STREAM_INTELLIGENCE"
       ]
     },
     "target_source": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "maxLength": 2048
     },
     "operator": {
       "type": "string",
@@ -32,14 +38,20 @@
         "LESS_THAN",
         "CROSSES_ABOVE",
         "CROSSES_BELOW",
+        "TOUCHES",
+        "CLOSES_ABOVE",
+        "CLOSES_BELOW",
         "EQUALS",
         "KEYWORD_MATCH",
         "STATE_FLIP",
-        "HASH_DELTA"
+        "HASH_DELTA",
+        "SEMANTIC_MATCH",
+        "PERCENT_CHANGE"
       ]
     },
     "threshold": {
-      "type": "string"
+      "type": "string",
+      "maxLength": 16000
     },
     "ttl_seconds": {
       "default": 300,
@@ -48,6 +60,29 @@
       "maximum": 9007199254740991
     },
     "last_evaluated_at": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "schedule_shard": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "next_evaluation_at": {
       "anyOf": [
         {
           "type": "integer",
@@ -90,9 +125,14 @@
       ]
     },
     "state_payload": {
-      "type": [
-        "string",
-        "null"
+      "anyOf": [
+        {
+          "type": "string",
+          "maxLength": 32000
+        },
+        {
+          "type": "null"
+        }
       ]
     },
     "health_status": {
@@ -120,7 +160,7 @@
   "required": [
     "id",
     "rule_id",
-    "sentry_type",
+    "sentinel_type",
     "target_source",
     "operator",
     "threshold",
