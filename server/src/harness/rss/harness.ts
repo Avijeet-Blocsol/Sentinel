@@ -139,7 +139,10 @@ export class RssResearchHarness {
           status: 'TIMED_OUT',
           taskId,
           query: task.query,
-          reason: errMsg,
+          // Abort implementations differ across fetch/runtime versions and
+          // may surface only "Request aborted". Keep the public outcome
+          // deterministic and make the timeout cause explicit.
+          reason: `RSS research timed out after ${this.config.timeoutMs}ms`,
           elapsedMs: Date.now() - session.startTime,
         };
       } else if (isAborted || errMsg.includes('cancelled') || errMsg.includes('abort')) {
@@ -147,7 +150,7 @@ export class RssResearchHarness {
           status: 'CANCELLED',
           taskId,
           query: task.query,
-          reason: errMsg,
+          reason: errMsg.toLowerCase().includes('cancel') ? errMsg : `RSS research cancelled: ${errMsg}`,
         };
       } else if (err instanceof ProviderError) {
         finalOutcome = {

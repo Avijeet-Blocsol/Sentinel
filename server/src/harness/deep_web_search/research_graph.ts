@@ -47,6 +47,7 @@ import {
   ScoutRevectorSchema,
   validateModelOutput,
 } from './schemas.js';
+import { parseStructuredJson } from '../../agent/structured_output.js';
 import {
   validateAndCanonicalizeUrl,
   verifyUrlOrigin,
@@ -202,38 +203,8 @@ export function extractJsonFromText<T>(text: string, fallback?: T): T {
     throw new Error('Empty model output, cannot extract JSON');
   }
 
-  // 1. Direct JSON parse
-  try {
-    return JSON.parse(text.trim());
-  } catch {}
-
-  // 2. Markdown fenced block ```json ... ```
-  const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-  if (fenceMatch && fenceMatch[1]) {
-    try {
-      return JSON.parse(fenceMatch[1].trim());
-    } catch {}
-  }
-
-  // 3. First '{' or '[' to matching last '}' or ']'
-  const firstBrace = text.indexOf('{');
-  const firstBracket = text.indexOf('[');
-  let startIdx = -1;
-  let endIdx = -1;
-
-  if (firstBrace !== -1 && (firstBracket === -1 || firstBrace < firstBracket)) {
-    startIdx = firstBrace;
-    endIdx = text.lastIndexOf('}');
-  } else if (firstBracket !== -1) {
-    startIdx = firstBracket;
-    endIdx = text.lastIndexOf(']');
-  }
-
-  if (startIdx !== -1 && endIdx > startIdx) {
-    try {
-      return JSON.parse(text.slice(startIdx, endIdx + 1));
-    } catch {}
-  }
+  const parsed = parseStructuredJson(text);
+  if (parsed !== null) return parsed as T;
 
   if (fallback !== undefined) return fallback;
   throw new Error(`Failed to extract JSON from text: ${text.slice(0, 160)}...`);

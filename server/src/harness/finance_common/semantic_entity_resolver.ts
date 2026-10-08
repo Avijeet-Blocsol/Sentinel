@@ -80,14 +80,18 @@ export async function resolveSemanticEntity(
         ? message.content.map((b: any) => b.text || '').join('')
         : '';
 
-    const cleaned = text.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const cleaned = Array.from(text.trim().toUpperCase())
+      .filter((character) =>
+        (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9')
+      )
+      .join('');
     if (cleaned === 'NONE' || cleaned.length < 1 || cleaned.length > 8) {
       return null;
     }
 
     return cleaned;
   } catch {
-    // Graceful fallback to regex heuristic
+    // Semantic resolution failure is intentionally fail-closed.
     return null;
   }
 }

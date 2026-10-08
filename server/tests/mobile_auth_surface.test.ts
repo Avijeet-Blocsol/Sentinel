@@ -3,7 +3,6 @@ import { randomUUID } from 'node:crypto';
 import { buildServer } from '../src/server/app.js';
 
 async function run(): Promise<void> {
-  delete process.env.SENTINEL_ALLOW_INSECURE_LOCAL_AUTH;
   const app = await buildServer({ logger: false });
   const id = randomUUID();
   const privateRoutes = [
@@ -37,6 +36,13 @@ async function run(): Promise<void> {
         `${route.method} ${route.url} must reject a request without credentials`,
       );
     }
+
+    const rawUserIdBearer = await app.inject({
+      method: 'GET',
+      url: '/api/users/me',
+      headers: { authorization: 'Bearer test-user-id' },
+    });
+    assert.equal(rawUserIdBearer.statusCode, 401, 'raw user IDs must never bypass Clerk verification');
 
     assert.equal((await app.inject({ method: 'GET', url: '/healthz' })).statusCode, 200);
     assert.notEqual((await app.inject({ method: 'GET', url: '/readyz' })).statusCode, 401);

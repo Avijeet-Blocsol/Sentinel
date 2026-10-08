@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS agent_conversations (
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     title TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'ARCHIVED', 'SYNTHESIZED')),
-    phase TEXT NOT NULL DEFAULT 'DISCOVERY' CHECK (phase IN ('DISCOVERY', 'AWAITING_QUERY_CONFIRMATION', 'SCOUTING', 'INTERRUPT_PENDING', 'DEPLOYED')),
+    phase TEXT NOT NULL DEFAULT 'DISCOVERY' CHECK (phase IN ('DISCOVERY', 'AWAITING_QUERY_CONFIRMATION', 'SCOUTING', 'AWAITING_TRIGGER_MODE', 'CLARIFICATION_PENDING', 'INTERRUPT_PENDING', 'DEPLOYED')),
     created_at INTEGER NOT NULL
 );
 
@@ -157,7 +157,8 @@ CREATE TABLE IF NOT EXISTS alert_events (
 CREATE TABLE IF NOT EXISTS interrupt_actions (
     id TEXT PRIMARY KEY,
     alert_id TEXT REFERENCES alert_events(id) ON DELETE CASCADE,
-    rule_id TEXT NOT NULL REFERENCES rules(id) ON DELETE CASCADE,
+    rule_id TEXT REFERENCES rules(id) ON DELETE CASCADE,
+    conversation_id TEXT REFERENCES agent_conversations(id) ON DELETE CASCADE,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     action_type TEXT NOT NULL,
     action_payload TEXT NOT NULL,
@@ -170,7 +171,7 @@ CREATE TABLE IF NOT EXISTS interrupt_actions (
 -- 11. Execution Leases: idempotency and distributed worker ownership
 CREATE TABLE IF NOT EXISTS execution_leases (
     id TEXT PRIMARY KEY,
-    event_type TEXT NOT NULL CHECK (event_type IN ('TICK', 'EVALUATE_RULE')),
+    event_type TEXT NOT NULL CHECK (event_type IN ('TICK', 'EVALUATE_RULE', 'WORKFLOW_RESUME')),
     rule_id TEXT REFERENCES rules(id) ON DELETE SET NULL,
     status TEXT NOT NULL CHECK (status IN ('RUNNING', 'SUCCEEDED', 'FAILED')),
     lease_owner TEXT NOT NULL,

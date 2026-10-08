@@ -13,12 +13,11 @@ const secretKey = process.env.CLERK_SECRET_KEY || '';
 const publishableKey = process.env.CLERK_PUBLISHABLE_KEY || '';
 const configuredServiceSecret = process.env.ENGINE_API_SECRET || process.env.SENTINEL_SERVICE_SECRET || '';
 
-function allowsInsecureLocalBearerTokens(): boolean {
-  return process.env.NODE_ENV !== 'production' && process.env.SENTINEL_ALLOW_INSECURE_LOCAL_AUTH === 'true';
-}
-
 if (process.env.NODE_ENV === 'production' && !configuredServiceSecret) {
   throw new Error('Production requires ENGINE_API_SECRET or SENTINEL_SERVICE_SECRET');
+}
+if (process.env.NODE_ENV === 'production' && !secretKey) {
+  throw new Error('Production requires CLERK_SECRET_KEY');
 }
 
 function secretsEqual(left: string, right: string): boolean {
@@ -36,42 +35,19 @@ export const clerkClient = createClerkClient({
  * Extracts and verifies Clerk token from Authorization header or query parameter
  */
 export async function verifyToken(token: string): Promise<string> {
-  if (secretKey) {
-    try {
-      const verified = await clerkVerifyToken(token, {
-        secretKey,
-      });
-      if (verified && verified.sub) {
-        return verified.sub;
-      }
-    } catch (verifyErr) {
-      if (process.env.NODE_ENV === 'production') {
-        throw verifyErr;
-      }
-    }
+  if (!secretKey) {
+    throw new Error('CLERK_SECRET_KEY is not configured');
   }
 
-  // An explicit local-only switch supports isolated integration tests and
-  // offline demos. It is disabled by default; normal development uses the
-  // same Clerk signature verification as production.
-  if (allowsInsecureLocalBearerTokens()) {
-    try {
-      const parts = token.split('.');
-      if (parts.length === 3) {
-        const payloadJson = Buffer.from(parts[1], 'base64url').toString('utf8');
-        const payload = JSON.parse(payloadJson);
-        if (payload.sub && typeof payload.sub === 'string') {
-          return payload.sub;
-        }
-      }
-    } catch {
-      // ignore decode error and check direct string below
+  try {
+    const verified = await clerkVerifyToken(token, {
+      secretKey,
+    });
+    if (verified && verified.sub) {
+      return verified.sub;
     }
-
-    // Direct user ID fallback for explicitly opted-in local integration tests.
-    if (token && typeof token === 'string' && !token.includes(' ') && token.length > 0) {
-      return token;
-    }
+  } catch (verifyErr) {
+    throw verifyErr;
   }
 
   throw new Error('Clerk token verification failed');
@@ -127,22 +103,9 @@ export async function getOrCreateUser(userId: string): Promise<User> {
 
     return await createOrReadConcurrent(newUser);
   } catch (err) {
-    if (process.env.NODE_ENV === 'production') {
-      throw err;
-    }
-    // Fallback stub if Clerk user fetch fails (e.g. offline/mock environment)
-    const fallbackUser: User = {
-      id: userId,
-      google_sub: null,
-      apple_sub: null,
-      github_sub: null,
-      email: `${userId}@sentinel.local`,
-      name: 'Sentinel User',
-      avatar_url: null,
-      created_at: Date.now(),
-      updated_at: Date.now(),
-    };
-    return await createOrReadConcurrent(fallbackUser);
+    // A verified session still requires a successful Clerk profile lookup so
+    // the persisted identity is never synthesized from a placeholder.
+    throw err;
   }
 }
 

@@ -28,6 +28,7 @@ import type {
   InterruptAction,
   EnrichedInterruptAction,
 } from '@sentinel/shared';
+import { isChoiceInterruptActionType } from '@sentinel/shared';
 import type {
   DatabaseAdapter,
   EnrichedAlertEvent,
@@ -44,6 +45,9 @@ import type {
   IExecutionRepository,
   DeploymentCommitInput,
   DeploymentProposalInput,
+  MonitoringModeDeploymentInput,
+  MonitoringModeProposalInput,
+  TaskEditCommitInput,
   ExecutionLeaseRecord,
   TriggerCommitInput,
 } from '../types.js';
@@ -924,6 +928,55 @@ export const dynamoInterruptActionRepository: IInterruptActionRepository = {
     );
   },
 
+  async createClarification(input: {
+    action: InterruptAction;
+    conversationId: string;
+    userId: string;
+    expectedPhase: AgentConversation['phase'];
+    now: number;
+  }): Promise<boolean> {
+    if (
+      !isChoiceInterruptActionType(input.action.action_type) ||
+      input.action.status !== 'PENDING' ||
+      input.action.user_id !== input.userId ||
+      input.action.conversation_id !== input.conversationId
+    ) {
+      return false;
+    }
+
+    try {
+      await getDynamoClient().send(new TransactWriteCommand({
+        ClientRequestToken: input.action.id.slice(0, 36),
+        TransactItems: [
+          {
+            Put: {
+              TableName: TABLES.INTERRUPTS,
+              Item: { ...input.action, conversation_id: input.conversationId, created_at: input.now },
+              ConditionExpression: 'attribute_not_exists(id)',
+            },
+          },
+          {
+            Update: {
+              TableName: TABLES.CONVERSATIONS,
+              Key: { id: input.conversationId },
+              UpdateExpression: 'SET phase = :pending',
+              ConditionExpression: 'user_id = :userId AND phase = :expectedPhase',
+              ExpressionAttributeValues: {
+                ':pending': 'CLARIFICATION_PENDING',
+                ':userId': input.userId,
+                ':expectedPhase': input.expectedPhase,
+              },
+            },
+          },
+        ],
+      }));
+      return true;
+    } catch (error) {
+      if (isConditionalCheckFailure(error)) return false;
+      throw error;
+    }
+  },
+
   async getPendingByUserId(userId: string): Promise<EnrichedInterruptAction[]> {
     const client = getDynamoClient();
     const items = await queryAll<InterruptAction>(client, {
@@ -943,15 +996,42 @@ export const dynamoInterruptActionRepository: IInterruptActionRepository = {
     );
     const enriched: EnrichedInterruptAction[] = [];
     for (const item of activeItems) {
-      const rule = await dynamoRuleRepository.getById(item.rule_id);
+      const rule = item.rule_id ? await dynamoRuleRepository.getById(item.rule_id) : null;
       enriched.push({
         ...item,
-        conversation_id: rule?.conversation_id ?? null,
+        conversation_id: item.conversation_id ?? rule?.conversation_id ?? null,
         rule_title: rule?.title ?? null,
       });
     }
 
     return enriched;
+  },
+
+  async getLatestByConversationId(
+    conversationId: string,
+    actionType: string,
+    status: InterruptAction['status'],
+  ): Promise<EnrichedInterruptAction | null> {
+    const client = getDynamoClient();
+    const items = await scanAll<InterruptAction>(client, {
+      TableName: TABLES.INTERRUPTS,
+      FilterExpression: 'conversation_id = :conversationId AND action_type = :actionType AND #st = :status',
+      ExpressionAttributeNames: { '#st': 'status' },
+      ExpressionAttributeValues: {
+        ':conversationId': conversationId,
+        ':actionType': actionType,
+        ':status': status,
+      },
+    });
+    const latest = items
+      .sort((left, right) => (right.resolved_at ?? right.created_at) - (left.resolved_at ?? left.created_at))[0];
+    if (!latest) return null;
+    const rule = latest.rule_id ? await dynamoRuleRepository.getById(latest.rule_id) : null;
+    return {
+      ...latest,
+      conversation_id: latest.conversation_id ?? rule?.conversation_id ?? null,
+      rule_title: rule?.title ?? null,
+    };
   },
 
   async getPending(): Promise<InterruptAction[]> {
@@ -1002,13 +1082,36 @@ export const dynamoInterruptActionRepository: IInterruptActionRepository = {
 
     if (!result.Item) return null;
     const action = result.Item as InterruptAction;
-    const rule = await dynamoRuleRepository.getById(action.rule_id);
+    const rule = action.rule_id ? await dynamoRuleRepository.getById(action.rule_id) : null;
 
     return {
       ...action,
-      conversation_id: rule?.conversation_id ?? null,
+      conversation_id: action.conversation_id ?? rule?.conversation_id ?? null,
       rule_title: rule?.title ?? null,
     };
+  },
+
+  async updateActionPayload(id: string, actionPayload: string): Promise<boolean> {
+    const client = getDynamoClient();
+    const now = Date.now();
+    try {
+      await client.send(new UpdateCommand({
+        TableName: TABLES.INTERRUPTS,
+        Key: { id },
+        UpdateExpression: 'SET action_payload = :payload',
+        ConditionExpression: '#st = :pending AND (attribute_not_exists(expires_at) OR expires_at > :now)',
+        ExpressionAttributeNames: { '#st': 'status' },
+        ExpressionAttributeValues: {
+          ':payload': actionPayload,
+          ':pending': 'PENDING',
+          ':now': now,
+        },
+      }));
+      return true;
+    } catch (error) {
+      if (isConditionalCheckFailure(error)) return false;
+      throw error;
+    }
   },
 
   async updateStatus(id: string, status: InterruptAction['status']): Promise<void> {
@@ -1041,6 +1144,105 @@ export const dynamoInterruptActionRepository: IInterruptActionRepository = {
       return true;
     } catch (error) {
       if (isConditionalCheckFailure(error)) return false;
+      throw error;
+    }
+  },
+
+  async resolveClarification(input: {
+    interruptId: string;
+    conversationId: string;
+    userId: string;
+    resolution: 'APPROVED' | 'REJECTED';
+    resumePhase: AgentConversation['phase'];
+    now: number;
+  }): Promise<boolean> {
+    try {
+      await getDynamoClient().send(new TransactWriteCommand({
+        ClientRequestToken: `${input.interruptId}-clarification-resolve`.slice(0, 36),
+        TransactItems: [
+          {
+            Update: {
+              TableName: TABLES.INTERRUPTS,
+              Key: { id: input.interruptId },
+              UpdateExpression: 'SET #st = :resolution, resolved_at = :now',
+              ConditionExpression: '#st = :pending AND conversation_id = :conversationId AND user_id = :userId AND (attribute_not_exists(expires_at) OR expires_at > :now)',
+              ExpressionAttributeNames: { '#st': 'status' },
+              ExpressionAttributeValues: {
+                ':resolution': input.resolution,
+                ':pending': 'PENDING',
+                ':conversationId': input.conversationId,
+                ':userId': input.userId,
+                ':now': input.now,
+              },
+            },
+          },
+          {
+            Update: {
+              TableName: TABLES.CONVERSATIONS,
+              Key: { id: input.conversationId },
+              UpdateExpression: 'SET phase = :resumePhase',
+              ConditionExpression: 'user_id = :userId AND phase = :pendingPhase',
+              ExpressionAttributeValues: {
+                ':resumePhase': input.resumePhase,
+                ':pendingPhase': 'CLARIFICATION_PENDING',
+                ':userId': input.userId,
+              },
+            },
+          },
+        ],
+      }));
+      return true;
+    } catch (error) {
+      if (isConditionalCheckFailure(error)) return false;
+      throw error;
+    }
+  },
+
+  async restorePendingClarification(input: {
+    interruptId: string;
+    conversationId: string;
+    userId: string;
+    now: number;
+  }): Promise<boolean> {
+    try {
+      await getDynamoClient().send(new TransactWriteCommand({
+        ClientRequestToken: `${input.interruptId}-clarification-repair`.slice(0, 36),
+        TransactItems: [
+          {
+            ConditionCheck: {
+              TableName: TABLES.INTERRUPTS,
+              Key: { id: input.interruptId },
+              ConditionExpression: '#st = :pending AND conversation_id = :conversationId AND user_id = :userId AND (attribute_not_exists(expires_at) OR expires_at > :now)',
+              ExpressionAttributeNames: { '#st': 'status' },
+              ExpressionAttributeValues: {
+                ':pending': 'PENDING',
+                ':conversationId': input.conversationId,
+                ':userId': input.userId,
+                ':now': input.now,
+              },
+            },
+          },
+          {
+            Update: {
+              TableName: TABLES.CONVERSATIONS,
+              Key: { id: input.conversationId },
+              UpdateExpression: 'SET phase = :pending',
+              ConditionExpression: 'user_id = :userId AND phase <> :deployed',
+              ExpressionAttributeValues: {
+                ':pending': 'CLARIFICATION_PENDING',
+                ':deployed': 'DEPLOYED',
+                ':userId': input.userId,
+              },
+            },
+          },
+        ],
+      }));
+      return true;
+    } catch (error) {
+      if (isConditionalCheckFailure(error)) {
+        const conversation = await dynamoConversationRepository.getById(input.conversationId);
+        return conversation?.user_id === input.userId && conversation.phase === 'CLARIFICATION_PENDING';
+      }
       throw error;
     }
   },
@@ -1160,6 +1362,76 @@ export const dynamoDeploymentRepository = {
     }
   },
 
+  async stageMonitoringMode(input: MonitoringModeProposalInput): Promise<boolean> {
+    if (
+      input.rule.conversation_id !== input.conversationId ||
+      input.rule.status !== 'PAUSED' ||
+      input.subSentinels.some((sub) => sub.rule_id !== input.rule.id) ||
+      input.subSentinels.length + input.baselineEvents.length + 2 > 90
+    ) {
+      return false;
+    }
+
+    const client = getDynamoClient();
+    const transactItems: any[] = [
+      {
+        Put: {
+          TableName: TABLES.RULES,
+          Item: { ...input.rule, status: 'PAUSED', updated_at: input.now },
+          ConditionExpression: 'attribute_not_exists(id)',
+        },
+      },
+      ...input.subSentinels.map((sub) => ({
+        Put: {
+          TableName: TABLES.SUB_SENTINELS,
+          Item: {
+            ...sub,
+            ...getInitialDueSchedule(sub, input.now),
+            health_status: sub.health_status || 'HEALTHY',
+            error_count: sub.error_count ?? 0,
+            is_satisfied: sub.is_satisfied ?? 0,
+          },
+          ConditionExpression: 'attribute_not_exists(id)',
+        },
+      })),
+      ...input.baselineEvents.map((event) => ({
+        Put: {
+          TableName: TABLES.SEEN_EVENTS,
+          Item: { ...event, seen_at: input.now },
+        },
+      })),
+      {
+        Update: {
+          TableName: TABLES.CONVERSATIONS,
+          Key: { id: input.conversationId },
+          UpdateExpression: 'SET phase = :phase',
+           // A monitoring proposal may only be staged from the active
+           // reconnaissance boundary (or the legacy recovery phase). This
+           // prevents a stale/replayed model result from jumping a task into
+           // the lifecycle gate from an unrelated phase.
+           ConditionExpression: 'user_id = :userId AND phase IN (:scouting, :awaitingMode)',
+           ExpressionAttributeValues: {
+             ':phase': 'AWAITING_TRIGGER_MODE',
+             ':userId': input.rule.user_id,
+             ':scouting': 'SCOUTING',
+             ':awaitingMode': 'AWAITING_TRIGGER_MODE',
+           },
+        },
+      },
+    ];
+
+    try {
+      await client.send(new TransactWriteCommand({
+        ClientRequestToken: input.rule.id.slice(0, 36),
+        TransactItems: transactItems,
+      }));
+      return true;
+    } catch (error) {
+      if (isConditionalCheckFailure(error)) return false;
+      throw error;
+    }
+  },
+
   async approve(input: DeploymentCommitInput): Promise<boolean> {
     const client = getDynamoClient();
     if (input.subSentinels.length + input.baselineEvents.length + 3 > 90) {
@@ -1233,6 +1505,153 @@ export const dynamoDeploymentRepository = {
       await client.send(new TransactWriteCommand({
         // DynamoDB limits ClientRequestToken to 36 characters. The interrupt
         // UUID is already unique and stable for the duration of this commit.
+        ClientRequestToken: input.interruptId.slice(0, 36),
+        TransactItems: transactItems,
+      }));
+      return true;
+    } catch (error) {
+      if (isConditionalCheckFailure(error)) return false;
+      throw error;
+    }
+  },
+
+  async deployMonitoringMode(input: MonitoringModeDeploymentInput): Promise<boolean> {
+    const client = getDynamoClient();
+    try {
+      await client.send(new TransactWriteCommand({
+        ClientRequestToken: `${input.ruleId}-${input.triggerMode}`.slice(0, 36),
+        TransactItems: [
+          {
+            Update: {
+              TableName: TABLES.RULES,
+              Key: { id: input.ruleId },
+              UpdateExpression: 'SET trigger_mode = :triggerMode, #st = :active, updated_at = :now',
+              ConditionExpression: '#st = :paused AND user_id = :userId AND conversation_id = :conversationId',
+              ExpressionAttributeNames: { '#st': 'status' },
+              ExpressionAttributeValues: {
+                ':triggerMode': input.triggerMode,
+                ':paused': 'PAUSED',
+                ':active': 'ACTIVE',
+                ':userId': input.userId,
+                ':conversationId': input.conversationId,
+                ':now': input.now,
+              },
+            },
+          },
+          {
+            Update: {
+              TableName: TABLES.CONVERSATIONS,
+              Key: { id: input.conversationId },
+              UpdateExpression: 'SET #status = :synthesized, phase = :deployed',
+              ConditionExpression: 'user_id = :userId',
+              ExpressionAttributeNames: { '#status': 'status' },
+              ExpressionAttributeValues: {
+                ':synthesized': 'SYNTHESIZED',
+                ':deployed': 'DEPLOYED',
+                ':userId': input.userId,
+              },
+            },
+          },
+        ],
+      }));
+      return true;
+    } catch (error) {
+      if (isConditionalCheckFailure(error)) return false;
+      throw error;
+    }
+  },
+
+  /** Atomically applies a confirmed task edit with optimistic concurrency. */
+  async applyTaskEdit(input: TaskEditCommitInput): Promise<boolean> {
+    const client = getDynamoClient();
+    // DynamoDB does not provide relational cascade deletes. Read the orphan
+    // baseline ids before the transaction so their deletion can participate in
+    // the same all-or-nothing commit as the condition deletion.
+    const deletedSeenEvents = (await Promise.all(input.deletedSubSentinelIds.map(async (subSentinelId) =>
+      (await scanAll<{ id: string }>(client, {
+        TableName: TABLES.SEEN_EVENTS,
+        FilterExpression: 'sub_sentinel_id = :sid',
+        ExpressionAttributeValues: { ':sid': subSentinelId },
+      })).map((event) => ({ ...event, subSentinelId })),
+    ))).flat();
+    if (input.subSentinels.length + input.deletedSubSentinelIds.length + deletedSeenEvents.length + 3 > 90) {
+      throw new Error('Task edit exceeds DynamoDB transaction size');
+    }
+
+    const transactItems: any[] = [
+      {
+        Put: {
+          TableName: TABLES.RULES,
+          Item: { ...input.rule, condition_tree: input.rule.condition_tree ?? null },
+          ConditionExpression: 'user_id = :userId AND conversation_id = :conversationId AND updated_at = :expectedUpdatedAt AND (#st = :active OR #st = :triggered)',
+          ExpressionAttributeNames: { '#st': 'status' },
+          ExpressionAttributeValues: {
+            ':userId': input.userId,
+            ':conversationId': input.conversationId,
+            ':expectedUpdatedAt': input.expectedRuleUpdatedAt,
+            ':active': 'ACTIVE',
+            ':triggered': 'TRIGGERED',
+          },
+        },
+      },
+      ...input.deletedSubSentinelIds.map((id) => ({
+        Delete: {
+          TableName: TABLES.SUB_SENTINELS,
+          Key: { id },
+          ConditionExpression: 'rule_id = :ruleId',
+          ExpressionAttributeValues: { ':ruleId': input.rule.id },
+        },
+      })),
+      ...deletedSeenEvents.map((event) => ({
+        Delete: {
+          TableName: TABLES.SEEN_EVENTS,
+          Key: { id: event.id },
+          ConditionExpression: 'sub_sentinel_id = :subSentinelId',
+          ExpressionAttributeValues: { ':subSentinelId': event.subSentinelId },
+        },
+      })),
+      ...input.subSentinels.map((sub) => ({
+        Put: {
+          TableName: TABLES.SUB_SENTINELS,
+          Item: { ...sub, ...getInitialDueSchedule(sub, input.now) },
+        },
+      })),
+      {
+        Update: {
+          TableName: TABLES.CONVERSATIONS,
+          Key: { id: input.conversationId },
+          UpdateExpression: 'SET #status = :synthesized, phase = :deployed',
+          ConditionExpression: 'user_id = :userId AND (phase = :deployed OR phase = :clarificationPending)',
+          ExpressionAttributeNames: { '#status': 'status' },
+          ExpressionAttributeValues: {
+            ':synthesized': 'SYNTHESIZED',
+            ':deployed': 'DEPLOYED',
+            ':clarificationPending': 'CLARIFICATION_PENDING',
+            ':userId': input.userId,
+          },
+        },
+      },
+      {
+        Update: {
+          TableName: TABLES.INTERRUPTS,
+          Key: { id: input.interruptId },
+          UpdateExpression: 'SET #st = :approved, resolved_at = :now',
+          ConditionExpression: '#st = :pending AND user_id = :userId AND conversation_id = :conversationId AND rule_id = :ruleId AND (attribute_not_exists(expires_at) OR expires_at > :now)',
+          ExpressionAttributeNames: { '#st': 'status' },
+          ExpressionAttributeValues: {
+            ':approved': 'APPROVED',
+            ':pending': 'PENDING',
+            ':userId': input.userId,
+            ':conversationId': input.conversationId,
+            ':ruleId': input.rule.id,
+            ':now': input.now,
+          },
+        },
+      },
+    ];
+
+    try {
+      await getDynamoClient().send(new TransactWriteCommand({
         ClientRequestToken: input.interruptId.slice(0, 36),
         TransactItems: transactItems,
       }));

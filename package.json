@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "generate:schemas": "npm --prefix server run generate:schemas",
-    "demo:server": "npm --prefix server run demo"
+    "server:dev": "npm --prefix server run dev"
   },
   "devDependencies": {
     "tsx": "^4.19.1"

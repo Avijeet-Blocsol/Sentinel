@@ -11,27 +11,21 @@ import { sentinelClient } from '../api/sentinel_client';
 import { useSentinelStore } from '../store/useSentinelStore';
 import { registerForPushNotificationsAsync } from '../services/push_notifications';
 
-/**
- * One app-level lifecycle owner for auth, push registration, and foreground
- * revalidation. Keep this out of the read-only state hook below: multiple
- * screens can safely consume `useSentinel` without duplicating side effects.
- */
+
 export function useSentinelBootstrap() {
   const { getToken, isSignedIn, isLoaded } = useAuth();
   const pushRegistrationAttempted = useRef(false);
   const appState = useRef<AppStateStatus>(AppState.currentState);
+  const getTokenRef = useRef(getToken);
+  getTokenRef.current = getToken;
+
   // Wire Clerk token provider whenever auth state stabilizes
   useEffect(() => {
     if (!isLoaded) return;
 
     if (isSignedIn) {
-      sentinelClient.setTokenProvider(async () => {
-        try {
-          return await getToken();
-        } catch (err) {
-          console.warn('[useSentinel] getToken error:', err);
-          return null;
-        }
+      sentinelClient.setTokenProvider(async ({ forceRefresh } = {}) => {
+        return getTokenRef.current(forceRefresh ? { skipCache: true } : undefined);
       });
 
       // Synchronize dashboard on sign in.
@@ -52,7 +46,7 @@ export function useSentinelBootstrap() {
       pushRegistrationAttempted.current = false;
       sentinelClient.resetSession(true);
     }
-  }, [isLoaded, isSignedIn, getToken]);
+  }, [isLoaded, isSignedIn]);
 
   // Mobile operating systems may suspend or terminate an idle socket while an
   // app is backgrounded. Resume from durable HTTP state first, then reopen the
@@ -85,6 +79,7 @@ export function useSentinel() {
   const activeConversationTitle = useSentinelStore((s) => s.activeConversationTitle);
   const streamingMessage = useSentinelStore((s) => s.streamingMessage);
   const isGenerating = useSentinelStore((s) => s.isGenerating);
+  const statusRequestInFlight = useSentinelStore((s) => s.statusRequestInFlight);
   const setIsGenerating = useSentinelStore((s) => s.setIsGenerating);
   const chatMessages = useSentinelStore((s) => s.chatMessages);
   const conversations = useSentinelStore((s) => s.conversations);
@@ -98,13 +93,13 @@ export function useSentinel() {
     sentinelClient.sendMessage(content);
   }, []);
 
-  const dispatchPrompt = useCallback((content: string) => {
-    return sentinelClient.dispatchPrompt(content);
+  const dispatchPrompt = useCallback((content: string, options?: { forceNew?: boolean }) => {
+    return sentinelClient.dispatchPrompt(content, options);
   }, []);
 
   const resolveInterrupt = useCallback(
-    (interruptId: string, resolution: 'APPROVED' | 'REJECTED') => {
-      sentinelClient.resolveInterrupt(interruptId, resolution);
+    (interruptId: string, resolution: 'APPROVED' | 'REJECTED', choiceId?: string, responseText?: string) => {
+      return sentinelClient.resolveInterrupt(interruptId, resolution, choiceId, responseText);
     },
     []
   );
@@ -137,6 +132,7 @@ export function useSentinel() {
     activeConversationTitle,
     streamingMessage,
     isGenerating,
+    statusRequestInFlight,
     setIsGenerating,
     chatMessages,
     conversations,

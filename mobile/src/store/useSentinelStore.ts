@@ -44,6 +44,7 @@ interface SentinelStoreState {
   streamingTurnId: string | null;
   lastStreamSequence: number;
   completedStreamTurns: Record<string, boolean>;
+  statusRequestInFlight: boolean;
 
   // Sentinels, Rules & Telemetry
   rules: Rule[];
@@ -62,14 +63,16 @@ interface SentinelStoreState {
   ) => void;
   setConversations: (conversations: AgentConversation[]) => void;
   addConversation: (conversation: AgentConversation) => void;
+  updateConversationPhase: (conversationId: string, phase: AgentConversation['phase']) => void;
   setActiveConversationId: (id: string | null) => void;
   setActiveConversationTitle: (title: string | null) => void;
   setIsGenerating: (isGenerating: boolean) => void;
+  setStatusRequestInFlight: (inFlight: boolean) => void;
   setChatMessages: (messages: ChatMessage[]) => void;
   addChatMessage: (msg: ChatMessage) => void;
   removeChatMessage: (id: string) => void;
   appendStreamingChunk: (chunk: string, turnId?: string, sequence?: number) => void;
-  finishStreaming: (finalMessage?: string, turnId?: string) => void;
+  finishStreaming: (finalMessage?: string, turnId?: string, messageId?: string) => void;
   clearStreaming: () => void;
 
   // Actions - Sentinels & Telemetry
@@ -79,6 +82,7 @@ interface SentinelStoreState {
   updateRuleStatus: (ruleId: string, status: Rule['status']) => void;
   updateSubSentinel: (sentinel: Partial<SubSentinel> & { id: string; rule_id: string }) => void;
   updateSubSentry: (sentinel: Partial<SubSentinel> & { id: string; rule_id: string }) => void;
+  clearTelemetry: (ruleId: string) => void;
   setAlerts: (alerts: AlertEvent[]) => void;
   addAlert: (alert: AlertEvent) => void;
   setPendingActions: (actions: EnrichedInterruptAction[]) => void;
@@ -105,6 +109,7 @@ export const useSentinelStore = create<SentinelStoreState>((set) => ({
   streamingTurnId: null,
   lastStreamSequence: -1,
   completedStreamTurns: {},
+  statusRequestInFlight: false,
 
   rules: [],
   subSentinels: {},
@@ -132,17 +137,37 @@ export const useSentinelStore = create<SentinelStoreState>((set) => ({
       conversations: [conversation, ...state.conversations.filter((c) => c.id !== conversation.id)],
     })),
 
+  updateConversationPhase: (conversationId, phase) =>
+    set((state) => ({
+      conversations: state.conversations.map((conversation) =>
+        conversation.id === conversationId ? { ...conversation, phase } : conversation,
+      ),
+    })),
+
   setActiveConversationId: (activeConversationId) => set({ activeConversationId }),
 
   setActiveConversationTitle: (activeConversationTitle) => set({ activeConversationTitle }),
 
   setIsGenerating: (isGenerating) => set({ isGenerating }),
 
-  setChatMessages: (chatMessages) => set({ chatMessages: chatMessages.slice(-MAX_CHAT_MESSAGES) }),
+  setStatusRequestInFlight: (statusRequestInFlight) => set({ statusRequestInFlight }),
+
+  setChatMessages: (chatMessages) => {
+    const unique = new Map<string, ChatMessage>();
+    for (const message of chatMessages) unique.set(message.id, message);
+    set({
+      chatMessages: [...unique.values()]
+        .sort((left, right) => left.created_at - right.created_at)
+        .slice(-MAX_CHAT_MESSAGES),
+    });
+  },
 
   addChatMessage: (msg) =>
     set((state) => ({
-      chatMessages: [...state.chatMessages, msg].slice(-MAX_CHAT_MESSAGES),
+      chatMessages: [
+        ...state.chatMessages.filter((message) => message.id !== msg.id),
+        msg,
+      ].slice(-MAX_CHAT_MESSAGES),
     })),
 
   removeChatMessage: (id) =>
@@ -165,7 +190,7 @@ export const useSentinelStore = create<SentinelStoreState>((set) => ({
       };
     }),
 
-  finishStreaming: (finalMessage, turnId) =>
+  finishStreaming: (finalMessage, turnId, messageId) =>
     set((state) => {
       if (turnId && state.completedStreamTurns[turnId]) return state;
       const completedStreamTurns = turnId
@@ -177,7 +202,7 @@ export const useSentinelStore = create<SentinelStoreState>((set) => ({
       }
       const assistantMessage: ChatMessage | null = finalMessage
         ? {
-            id: makeLocalMessageId('stream'),
+            id: messageId || makeLocalMessageId('stream'),
             conversation_id: state.activeConversationId || '',
             role: 'assistant',
             content: finalMessage,
@@ -191,7 +216,10 @@ export const useSentinelStore = create<SentinelStoreState>((set) => ({
         lastStreamSequence: -1,
         completedStreamTurns,
         chatMessages: assistantMessage
-          ? [...state.chatMessages, assistantMessage].slice(-MAX_CHAT_MESSAGES)
+          ? [
+              ...state.chatMessages.filter((message) => message.id !== assistantMessage.id),
+              assistantMessage,
+            ].slice(-MAX_CHAT_MESSAGES)
           : state.chatMessages,
       };
     }),
@@ -206,10 +234,26 @@ export const useSentinelStore = create<SentinelStoreState>((set) => ({
         subMap[rule.id] = (rule as any).sub_sentinels;
       }
     }
-    set({
-      rules,
-      subSentinels: subMap,
-      subSentries: subMap,
+    set((state) => {
+      const nextTelemetry: Record<string, TelemetryPoint[]> = {};
+      for (const rule of rules) {
+        const durableTelemetry = (rule as Rule & { telemetry?: TelemetryPoint[] }).telemetry;
+        const liveTelemetry = state.telemetry[rule.id];
+
+        // Prefer the durable snapshot when available. If a refresh races a
+        // live WebSocket event and the database snapshot is still empty,
+        // preserve the points already rendered by the socket.
+        nextTelemetry[rule.id] = durableTelemetry?.length
+          ? [...durableTelemetry].sort((a, b) => a.timestamp - b.timestamp)
+          : liveTelemetry ?? [];
+      }
+
+      return {
+        rules,
+        subSentinels: subMap,
+        subSentries: subMap,
+        telemetry: nextTelemetry,
+      };
     });
   },
 
@@ -273,7 +317,21 @@ export const useSentinelStore = create<SentinelStoreState>((set) => ({
     }));
   },
 
-  setPendingActions: (pendingActions) => set({ pendingActions, resolvingInterruptIds: {} }),
+  setPendingActions: (pendingActions) =>
+    set((state) => {
+      const hasActiveConversationInterrupt = pendingActions.some(
+        (action) =>
+          action.conversation_id === state.activeConversationId &&
+          (!action.expires_at || action.expires_at > Date.now()),
+      );
+      return {
+        pendingActions,
+        resolvingInterruptIds: {},
+        ...(hasActiveConversationInterrupt
+          ? { isGenerating: false, streamingMessage: '', streamingTurnId: null, lastStreamSequence: -1 }
+          : {}),
+      };
+    }),
 
   addPendingAction: (action) =>
     set((state) => ({
@@ -304,13 +362,24 @@ export const useSentinelStore = create<SentinelStoreState>((set) => ({
     set((state) => {
       const targetKey = point.rule_id;
       const existing = state.telemetry[targetKey] || [];
-      const updated = [...existing, point].slice(-60); // Keep last 60 points for charts
+      // Reconnect repair can replay a durable point that is already in the
+      // chart. Keep telemetry idempotent and chronological on the client.
+      const updated = [...existing.filter((candidate) => candidate.id !== point.id), point]
+        .sort((a, b) => a.timestamp - b.timestamp)
+        .slice(-60); // Keep last 60 points for charts
       return {
         telemetry: {
           ...state.telemetry,
           [targetKey]: updated,
         },
       };
+    }),
+
+  clearTelemetry: (ruleId) =>
+    set((state) => {
+      const nextTelemetry = { ...state.telemetry };
+      delete nextTelemetry[ruleId];
+      return { telemetry: nextTelemetry };
     }),
 
   setLiveConnected: (connected) => set({ isLiveConnected: connected }),
@@ -329,6 +398,7 @@ export const useSentinelStore = create<SentinelStoreState>((set) => ({
       streamingTurnId: null,
       lastStreamSequence: -1,
       completedStreamTurns: {},
+      statusRequestInFlight: false,
       rules: [],
       subSentinels: {},
       subSentries: {},

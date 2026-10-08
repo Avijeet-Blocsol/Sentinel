@@ -8,32 +8,48 @@ import { View, Text, Dimensions } from 'react-native';
 import { LineChart } from 'react-native-gifted-charts';
 import type { TelemetryPoint } from '@sentinel/shared';
 
+export type TelemetryPresentation = 'time_series' | 'event';
+
 interface TelemetryChartProps {
   dataPoints: TelemetryPoint[];
   metricName?: string;
   height?: number;
+  presentation?: TelemetryPresentation;
+  ruleStatus?: 'ACTIVE' | 'PAUSED' | 'TRIGGERED' | 'DISMISSED' | 'ARCHIVED';
 }
 
 export const TelemetryChart: React.FC<TelemetryChartProps> = ({
   dataPoints,
   metricName = 'metric',
   height = 110,
+  presentation = 'time_series',
+  ruleStatus = 'ACTIVE',
 }) => {
   const screenWidth = Dimensions.get('window').width - 64; // Accounting for card padding
+  const isEventPresentation = presentation === 'event';
+  const sectionLabel = isEventPresentation ? `${metricName} Activity` : `${metricName} Telemetry`;
 
   if (dataPoints.length === 0) {
+    const emptyMessage = isEventPresentation
+      ? 'Telemetry is not applicable; matching events appear in Alerts.'
+      : ruleStatus === 'PAUSED'
+        ? 'Telemetry will resume when this Sentinel is active.'
+        : ruleStatus === 'TRIGGERED' || ruleStatus === 'DISMISSED' || ruleStatus === 'ARCHIVED'
+          ? 'No telemetry snapshot was recorded for this event.'
+          : 'Waiting for the first evaluation...';
+
     return (
       <View className="my-2 overflow-hidden rounded-xl bg-[#080B10] p-3 border border-[#161B22] items-center justify-center">
         <View className="flex-row items-center justify-between w-full px-1 pb-1">
           <Text className="text-[11px] font-bold uppercase tracking-wider text-[#8B949E]">
-            {metricName} Telemetry
+            {sectionLabel}
           </Text>
           <Text className="font-mono text-[11px] font-bold text-zinc-500">
             --
           </Text>
         </View>
-        <Text className="text-[11px] font-mono text-zinc-500 py-3">
-          Awaiting real-time telemetry stream...
+        <Text className="text-[11px] font-mono text-zinc-500 py-3 text-center">
+          {emptyMessage}
         </Text>
       </View>
     );
@@ -49,7 +65,7 @@ export const TelemetryChart: React.FC<TelemetryChartProps> = ({
     <View className="my-2 overflow-hidden rounded-xl bg-[#080B10] p-2 border border-[#161B22]">
       <View className="flex-row items-center justify-between px-2 pb-1">
         <Text className="text-[11px] font-bold uppercase tracking-wider text-[#8B949E]">
-          {metricName} Telemetry (Live)
+          {sectionLabel} (Live)
         </Text>
         <Text className="font-mono text-[11px] font-bold text-neon">
           {chartData[chartData.length - 1]?.value?.toFixed(1) ?? '--'}

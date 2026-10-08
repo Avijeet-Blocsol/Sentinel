@@ -182,12 +182,12 @@ async function run() {
   console.log('  PASS scheduler update/create fallback and removal are wired to AWS SDK commands');
 
   console.log('--- Conversation gate invariants ---');
-  assert.equal(isQueryConfirmationText('Confirm & Deploy'), true);
+  assert.equal(isQueryConfirmationText('Confirm & Deploy'), false);
   assert.equal(isQueryConfirmationText('tell me a joke'), false);
-  assert.equal(classifyUserInput('tell me a joke', { phase: 'SCOUTING' }), 'OFF_TOPIC_BS');
-  assert.equal(classifyUserInput('what is the current status?', { phase: 'DEPLOYED' }), 'TASK_STATUS_INQUIRY');
+  assert.equal(classifyUserInput('tell me a joke', { phase: 'SCOUTING' }), 'AI_UNAVAILABLE');
+  assert.equal(classifyUserInput('what is the current status?', { phase: 'DEPLOYED' }), 'AI_UNAVAILABLE');
   assert.match(generateLockedScopeResponse('SCOUTING'), /do not modify active tasks mid-flight/i);
-  console.log('  PASS confirmation, status, and off-topic classifications are deterministic');
+  console.log('  PASS free-form confirmation and synchronous intent fallbacks are disabled');
 }
 
 run().catch((error) => {

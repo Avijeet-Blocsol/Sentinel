@@ -135,9 +135,8 @@ export function EmailAuth() {
         }
 
         if (signIn.status === "complete" && signIn.createdSessionId) {
-          if (setActive) {
-            await setActive({ session: signIn.createdSessionId });
-          }
+          if (!setActive) throw new Error("Clerk session activation is unavailable.");
+          await setActive({ session: signIn.createdSessionId });
           Toast.show({
             type: "success",
             text1: "Access Granted",
@@ -159,9 +158,8 @@ export function EmailAuth() {
         }
 
         if (signUp.status === "complete" && signUp.createdSessionId) {
-          if (setActive) {
-            await setActive({ session: signUp.createdSessionId });
-          }
+          if (!setActive) throw new Error("Clerk session activation is unavailable.");
+          await setActive({ session: signUp.createdSessionId });
           Toast.show({
             type: "success",
             text1: "Account Verified",

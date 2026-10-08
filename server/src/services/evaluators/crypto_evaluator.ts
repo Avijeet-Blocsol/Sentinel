@@ -57,6 +57,7 @@ export class CryptoEvaluator implements SubSentinelEvaluator {
 
       const threshold: CryptoThreshold = parsedThreshold.data;
       const assetSymbol = threshold.assetSymbol.toUpperCase();
+      const quoteCurrency = threshold.currency.trim().toUpperCase();
       const operator = subSentinel.operator || threshold.operator || 'GREATER_THAN';
 
       let observedPrice: number | null = null;
@@ -66,6 +67,17 @@ export class CryptoEvaluator implements SubSentinelEvaluator {
 
       // 1. Venue resolution: strict isolation between DEXSCREENER and COINBASE
       if (threshold.venue === 'DEXSCREENER') {
+        // DexScreener's evaluator path exposes USD prices only. Never compare
+        // a non-USD threshold against a USD quote or silently reinterpret the
+        // user's requested unit.
+        if (quoteCurrency !== 'USD') {
+          return {
+            isSatisfied: false,
+            observedValue: null,
+            details: `DexScreener does not provide a ${quoteCurrency} quote for ${assetSymbol}`,
+            error: 'QUOTE_CURRENCY_UNAVAILABLE',
+          };
+        }
         if (threshold.dexContractAddress) {
           try {
             const pairs = await this.dexscreener.searchPairs(assetSymbol, {
@@ -114,7 +126,7 @@ export class CryptoEvaluator implements SubSentinelEvaluator {
       } else {
         // COINBASE venue
         try {
-          const product = await this.coinbase.resolveProduct(assetSymbol);
+          const product = await this.coinbase.resolveProduct(assetSymbol, undefined, quoteCurrency);
           if (product) {
             const spot = await this.coinbase.getSpotPrice(product.id, { signal });
             if (spot) {
@@ -127,7 +139,7 @@ export class CryptoEvaluator implements SubSentinelEvaluator {
           // Coinbase error, try DexScreener fallback for non-DEX venue if Coinbase unlisted
         }
 
-        if (observedPrice === null) {
+        if (observedPrice === null && quoteCurrency === 'USD') {
           try {
             const pairs = await this.dexscreener.searchPairs(assetSymbol, {
               symbol: assetSymbol,
@@ -174,7 +186,7 @@ export class CryptoEvaluator implements SubSentinelEvaluator {
 
         if (threshold.venue !== 'DEXSCREENER') {
           try {
-            const product = await this.coinbase.resolveProduct(assetSymbol);
+            const product = await this.coinbase.resolveProduct(assetSymbol, undefined, quoteCurrency);
             if (product) {
               candles = await this.coinbase.getCandles(product.id, granularity, { signal });
             }
@@ -249,10 +261,11 @@ export class CryptoEvaluator implements SubSentinelEvaluator {
         isSatisfied: evaluation.conditionSatisfied,
         observedValue: evaluation.observedValue,
         previousValue: tickPreviousValue,
-        unit: threshold.currency || 'USD',
+        unit: quoteCurrency,
         details: evaluation.evaluationDetails,
         extraMetadata: {
           assetSymbol,
+          currency: quoteCurrency,
           venue: threshold.venue,
           targetType: threshold.targetType,
           indicator: threshold.indicator,

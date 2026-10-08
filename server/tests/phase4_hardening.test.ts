@@ -225,6 +225,20 @@ async function runHardeningTests() {
   );
   console.log('  [PASS] Crypto evaluator venue isolation verified (no cross-venue fallback).');
 
+  const nonUsdDexSubSentinel: SubSentinel = {
+    ...dexSubSentinel,
+    id: randomUUID(),
+    threshold: JSON.stringify({
+      assetSymbol: 'PEPE',
+      currency: 'EUR',
+      venue: 'DEXSCREENER',
+      targetValue: 0.0001,
+    }),
+  };
+  const nonUsdDexResult = await cryptoEval.evaluate(nonUsdDexSubSentinel);
+  assert.strictEqual(nonUsdDexResult.error, 'QUOTE_CURRENCY_UNAVAILABLE');
+  console.log('  [PASS] Non-USD DEX tasks fail closed instead of comparing against USD.');
+
   // -------------------------------------------------------------
   // Test 6: Prediction Market Closed Market & Outcome Check (Finding 12)
   // -------------------------------------------------------------

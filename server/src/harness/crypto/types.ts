@@ -14,6 +14,7 @@ export interface CryptoResearchTask {
   id: string;
   query: string;
   assetSymbol?: string;
+  currency?: string;
   targetType?: 'PRICE' | 'INDICATOR' | 'CANDLESTICK';
   indicator?: TechnicalIndicator;
   candlestickPattern?: CandlestickPattern;

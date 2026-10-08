@@ -332,6 +332,8 @@ export const ConversationPhaseEnum = z.enum([
   'DISCOVERY',
   'AWAITING_QUERY_CONFIRMATION',
   'SCOUTING',
+  'AWAITING_TRIGGER_MODE',
+  'CLARIFICATION_PENDING',
   'INTERRUPT_PENDING',
   'DEPLOYED',
 ]);
@@ -677,13 +679,98 @@ export const InterruptStatusEnum = z.enum([
 ]);
 export type InterruptStatus = z.infer<typeof InterruptStatusEnum>;
 
+/**
+ * Choice-driven interrupt types. Every workflow gate that requires a user
+ * decision must use this contract so it can be rendered as an action card on
+ * every client and rehydrated after reconnects.
+ */
+export const ChoiceInterruptActionTypeEnum = z.enum([
+  'CLARIFICATION_REQUIRED',
+  'QUERY_CONFIRMATION_REQUIRED',
+  'MONITORING_MODE_REQUIRED',
+  'TASK_EDIT_CONFIRMATION_REQUIRED',
+]);
+export type ChoiceInterruptActionType = z.infer<typeof ChoiceInterruptActionTypeEnum>;
+
+export const ChoiceInterruptKindEnum = z.enum([
+  'CLARIFICATION_REQUIRED',
+  'QUERY_CONFIRMATION_REQUIRED',
+  'MONITORING_MODE_REQUIRED',
+  'TASK_EDIT_CONFIRMATION_REQUIRED',
+]);
+export type ChoiceInterruptKind = z.infer<typeof ChoiceInterruptKindEnum>;
+
+export function isChoiceInterruptActionType(actionType: string): actionType is ChoiceInterruptActionType {
+  return ChoiceInterruptActionTypeEnum.safeParse(actionType).success;
+}
+
+export const ClarificationChoiceSchema = z.object({
+  id: z.string().min(1).max(120),
+  label: z.string().min(1).max(300),
+  description: z.string().max(1000).optional(),
+  input: z.object({
+    kind: z.literal('TEXT'),
+    placeholder: z.string().max(300).optional(),
+    submit_label: z.string().min(1).max(80).optional(),
+    max_length: z.number().int().min(1).max(4000).optional(),
+  }).optional(),
+});
+export type ClarificationChoice = z.infer<typeof ClarificationChoiceSchema>;
+
+export const TaskEditOperationEnum = z.enum([
+  'DELETE_CONDITION',
+  'UPDATE_CONDITION',
+  'CHANGE_TRIGGER_MODE',
+]);
+export type TaskEditOperation = z.infer<typeof TaskEditOperationEnum>;
+
+/**
+ * A model-proposed edit is still only a proposal. The server checks the
+ * target UUID, expected rule version, resulting condition tree, and database
+ * ownership before committing it.
+ */
+export const TaskEditProposalSchema = z.object({
+  operation: TaskEditOperationEnum,
+  target_sub_sentinel_id: z.string().uuid().optional(),
+  target_label: z.string().max(500).optional(),
+  summary: z.string().min(1).max(4000),
+  expected_rule_updated_at: z.number().int().optional(),
+  changes: z.object({
+    schedule_seconds: z.number().int().positive().max(31_536_000).optional(),
+    operator: SentinelOperatorEnum.optional(),
+    threshold_patch: z.record(z.string(), z.unknown()).optional(),
+    trigger_mode: TriggerModeEnum.optional(),
+  }).default({}),
+});
+export type TaskEditProposal = z.infer<typeof TaskEditProposalSchema>;
+
+export const ChoiceInterruptPayloadSchema = z.object({
+  kind: ChoiceInterruptKindEnum,
+  question: z.string().min(1).max(4000),
+  // Agent-provided options are capped at eight; the server may append one
+  // explicit manual-response card so every interrupt remains resolvable.
+  choices: z.array(ClarificationChoiceSchema).min(2).max(9),
+  field: z.string().min(1).max(120).optional(),
+  resume_phase: ConversationPhaseEnum,
+  retry_message: z.string().max(8000).optional(),
+  task_edit: TaskEditProposalSchema.optional(),
+  task_edit_request: z.string().max(16000).optional(),
+});
+export type ChoiceInterruptPayload = z.infer<typeof ChoiceInterruptPayloadSchema>;
+
+export const ClarificationRequestPayloadSchema = ChoiceInterruptPayloadSchema.extend({
+  kind: z.literal('CLARIFICATION_REQUIRED'),
+});
+export type ClarificationRequestPayload = z.infer<typeof ClarificationRequestPayloadSchema>;
+
 export const InterruptActionSchema = z.object({
   id: z.string().uuid(),
   alert_id: z.string().uuid().nullable().optional(),
-  rule_id: z.string().uuid(),
+  rule_id: z.string().uuid().nullable().optional(),
+  conversation_id: z.string().uuid().nullable().optional(),
   user_id: z.string().min(1),
   action_type: z.string(),
-  action_payload: z.string(), // JSON string conforming to InterruptActionPayloadSchema
+  action_payload: z.string(), // JSON string conforming to the action-specific payload schema
   status: InterruptStatusEnum.default("PENDING"),
   expires_at: z.number().int().nullable().optional(),
   created_at: z.number().int(),
@@ -744,6 +831,11 @@ export const WsResolveInterruptMessageSchema = z.object({
   payload: z.object({
     interruptId: z.string().uuid(),
     resolution: z.enum(["APPROVED", "REJECTED"]),
+    // Every interrupt is resolved by an explicit UI action. Natural-language
+    // messages are never valid resolution requests. Manual text is carried
+    // only as the response to the explicit manual-response card.
+    choiceId: z.string().min(1).max(120),
+    responseText: z.string().trim().max(4000).optional(),
   }),
 });
 export type WsResolveInterruptMessage = z.infer<typeof WsResolveInterruptMessageSchema>;
@@ -799,6 +891,8 @@ export const InterruptResolvedEventSchema = z.object({
     resolution: z.enum(["APPROVED", "REJECTED"]),
     actionResult: z.string(),
     resolvedAt: z.number().int(),
+    choiceId: z.string().min(1).max(120),
+    responseText: z.string().max(4000).optional(),
   }),
 });
 export type InterruptResolvedEvent = z.infer<typeof InterruptResolvedEventSchema>;
@@ -828,6 +922,7 @@ export const AgentChatDoneEventSchema = z.object({
     messageId: z.string().uuid(),
     content: z.string(),
     turnId: z.string().uuid().optional(),
+    phase: ConversationPhaseEnum.optional(),
     rule: RuleSchema.nullable().optional(),
     subSentinels: z.array(SubSentinelSchema).optional().default([]),
     interrupt: EnrichedInterruptActionSchema.nullable().optional(),
@@ -929,6 +1024,10 @@ export type UpdateConversationStatusResponse = z.infer<typeof UpdateConversation
 // Rules
 export const RuleWithSubSentinelsSchema = RuleSchema.extend({
   sub_sentinels: z.array(SubSentinelSchema).default([]),
+  // Durable evaluation history is included with dashboard rule snapshots so
+  // clients can render charts after reconnecting or opening the dashboard
+  // without an active conversation socket.
+  telemetry: z.array(TelemetryPointSchema).default([]),
 });
 export type RuleWithSubSentinels = z.infer<typeof RuleWithSubSentinelsSchema>;
 
@@ -1017,6 +1116,9 @@ export const ALL_SCHEMAS = {
   AlertEvent: AlertEventSchema,
   InterruptAction: InterruptActionSchema,
   EnrichedInterruptAction: EnrichedInterruptActionSchema,
+  ChoiceInterruptPayload: ChoiceInterruptPayloadSchema,
+  ClarificationChoice: ClarificationChoiceSchema,
+  ClarificationRequestPayload: ClarificationRequestPayloadSchema,
   StockThreshold: StockThresholdSchema,
   CryptoThreshold: CryptoThresholdSchema,
   PredictionMarketThreshold: PredictionMarketThresholdSchema,

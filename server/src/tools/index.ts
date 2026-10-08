@@ -27,3 +27,6 @@ export * from './telegram_channel/index.js';
 
 // 8. Pre-Flight Dry Run & Baseline Verification
 export * from './pre_flight_probe.js';
+
+// 9. Agent-requested clarification interrupt
+export * from './request_clarification.js';

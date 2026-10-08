@@ -26,6 +26,7 @@ export function createCryptoResearchTool(config?: CryptoHarnessConfig) {
     inputSchema: z.object({
       query: z.string().describe('Natural language crypto monitoring intent (e.g. "BTC under 60k", "SOL 4h RSI oversold")'),
       assetSymbol: z.string().optional().describe('Direct token symbol if known (e.g. "BTC", "SOL", "PEPE")'),
+      currency: z.string().optional().describe('Explicit quote currency for a price threshold (e.g. USD, EUR, GBP)'),
       targetType: z.enum(['PRICE', 'INDICATOR', 'CANDLESTICK']).optional(),
       indicator: TechnicalIndicatorEnum.optional(),
       candlestickPattern: CandlestickPatternEnum.optional(),
@@ -39,6 +40,7 @@ export function createCryptoResearchTool(config?: CryptoHarnessConfig) {
       input: {
         query: string;
         assetSymbol?: string;
+        currency?: string;
         targetType?: 'PRICE' | 'INDICATOR' | 'CANDLESTICK';
         indicator?: z.infer<typeof TechnicalIndicatorEnum>;
         candlestickPattern?: z.infer<typeof CandlestickPatternEnum>;
@@ -56,6 +58,7 @@ export function createCryptoResearchTool(config?: CryptoHarnessConfig) {
         id: taskId,
         query: input.query,
         assetSymbol: input.assetSymbol,
+        currency: input.currency,
         targetType: input.targetType,
         indicator: input.indicator,
         candlestickPattern: input.candlestickPattern,
@@ -72,7 +75,14 @@ export function createCryptoResearchTool(config?: CryptoHarnessConfig) {
         yield next.value;
         next = await stream.next();
       }
-      return next.value;
+      const outcome = next.value;
+      if (outcome.status === 'ERROR') {
+        throw new Error(outcome.error);
+      }
+      if (outcome.status === 'TIMED_OUT' || outcome.status === 'CANCELLED') {
+        throw new Error(outcome.reason);
+      }
+      return outcome;
     },
   });
 }

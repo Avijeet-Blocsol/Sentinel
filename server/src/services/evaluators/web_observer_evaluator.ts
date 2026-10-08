@@ -16,9 +16,14 @@ import type { SubSentinelEvaluationResult, SubSentinelEvaluator } from './types.
 
 export class WebObserverEvaluator implements SubSentinelEvaluator {
   private readonly agenticEvaluator: AgenticConditionEvaluator;
+  private readonly fetchFn: typeof safeFetch;
 
-  constructor(options?: { agenticEvaluator?: AgenticConditionEvaluator }) {
+  constructor(options?: {
+    agenticEvaluator?: AgenticConditionEvaluator;
+    fetchFn?: typeof safeFetch;
+  }) {
     this.agenticEvaluator = options?.agenticEvaluator || globalAgenticEvaluator;
+    this.fetchFn = options?.fetchFn || safeFetch;
   }
   /**
    * Headless Playwright fallback for single-page applications (SPAs)
@@ -143,7 +148,7 @@ export class WebObserverEvaluator implements SubSentinelEvaluator {
       let extractedSnippet = '';
 
       try {
-        const res = await safeFetch(targetUrl, {
+        const res = await this.fetchFn(targetUrl, {
           signal,
           headers: {
             'User-Agent':

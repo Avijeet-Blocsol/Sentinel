@@ -121,10 +121,20 @@ export function sortFeedItems(items: NormalizedRssItem[]): NormalizedRssItem[] {
  */
 export function sanitizeSnippet(rawHtmlOrText: string, maxLength = 350): string {
   if (!rawHtmlOrText) return '';
-  // Unwrap CDATA
-  let clean = rawHtmlOrText.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1');
-  // Strip HTML tags
-  clean = clean.replace(/<[^>]*>/g, ' ');
+
+  // CDATA is an XML wrapper, not user-visible content. Remove only the
+  // wrapper, then let Cheerio parse the resulting HTML fragment. In
+  // particular, do not strip tags with a regex: quoted `>` characters,
+  // malformed fragments, comments, and nested markup all break that approach.
+  const withoutCdata = rawHtmlOrText.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1');
+  const $ = cheerio.load(withoutCdata, {}, false);
+  $('script, style, noscript, template').remove();
+  $('br').replaceWith('\n');
+  $('p, div, li, section, article, header, footer, h1, h2, h3, h4, h5, h6').each((_, element) => {
+    $(element).append('\n');
+  });
+
+  let clean = $.root().text();
   // Decode entities (two passes to catch double-encoded sequences like &amp;quot;)
   clean = decodeHtmlEntities(clean);
   if (clean.includes('&')) {

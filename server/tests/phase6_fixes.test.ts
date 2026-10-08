@@ -25,7 +25,7 @@ import {
   evaluateCryptoCondition,
 } from '../src/harness/finance_common/index.js';
 import { parseStockQuery } from '../src/harness/stocks/stock_graph.js';
-import { parseCryptoQuery } from '../src/harness/crypto/crypto_graph.js';
+import { inferCryptoQueryOperator, parseCryptoQuery } from '../src/harness/crypto/crypto_graph.js';
 import { WebSearchEvaluator } from '../src/services/evaluators/web_search_evaluator.js';
 import { executeWebSearch } from '../src/tools/deep_web_search/index.js';
 import { WebObserverEvaluator } from '../src/services/evaluators/web_observer_evaluator.js';
@@ -111,6 +111,42 @@ async function runPhase6Tests() {
     query: 'What is current BTC price',
   });
   assert.equal(cryptoObsParsed.isObservationOnly, true);
+  const proseOnlyCryptoParsed = parseCryptoQuery({
+    id: 'test-crypto-prose-only',
+    query: 'Notify me when Bitcoin rises above 75k',
+  });
+  assert.equal(proseOnlyCryptoParsed.assetSymbol, '', 'Crypto prose must not be parsed by a local fallback');
+  assert.equal(proseOnlyCryptoParsed.targetValue, undefined, 'Crypto prose must not supply a threshold without the Strands extractor');
+  assert.equal(
+    inferCryptoQueryOperator('Notify me when Bitcoin rises above 75k USD'),
+    'GREATER_THAN',
+    'Plain above-threshold wording must not become a crossing condition',
+  );
+  assert.equal(
+    inferCryptoQueryOperator('Notify me when Bitcoin crosses above 75k USD'),
+    'CROSSES_ABOVE',
+    'Explicit crossing wording must remain a crossing condition',
+  );
+
+  const structuredCryptoParsed = parseCryptoQuery({
+    id: 'test-crypto-structured',
+    query: 'ignored prose',
+    assetSymbol: 'Bitcoin',
+    currency: 'US Dollars',
+    expectedOperator: 'ABOVE' as any,
+    targetValue: 75000,
+  });
+  assert.equal(structuredCryptoParsed.assetSymbol, 'BTC');
+  assert.equal(structuredCryptoParsed.currency, 'USD');
+  assert.equal(structuredCryptoParsed.operator, 'GREATER_THAN');
+  assert.equal(structuredCryptoParsed.targetValue, 75000);
+  assert.throws(() => parseCryptoQuery({
+    id: 'test-crypto-missing-currency',
+    query: 'ignored prose',
+    assetSymbol: 'BTC',
+    expectedOperator: 'ABOVE' as any,
+    targetValue: 75000,
+  }), /explicit quote currency/);
   const cryptoObsEval = evaluateCryptoCondition({
     targetType: 'PRICE',
     operator: cryptoObsParsed.operator,

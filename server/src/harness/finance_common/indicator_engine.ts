@@ -46,6 +46,9 @@ import type { TechnicalIndicator, CandlestickPattern } from '@sentinel/shared';
 import type { OHLCV } from './types.js';
 
 export class UnsupportedIndicatorError extends Error {
+  public readonly code = 'VALIDATION_ERROR' as const;
+  public readonly retryable = false;
+
   constructor(public readonly indicator: string) {
     super(`Unsupported technical indicator: "${indicator}"`);
     this.name = 'UnsupportedIndicatorError';

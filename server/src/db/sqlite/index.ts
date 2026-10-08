@@ -20,10 +20,14 @@ import type {
   InterruptAction,
   EnrichedInterruptAction,
 } from '@sentinel/shared';
+import { isChoiceInterruptActionType } from '@sentinel/shared';
 import type {
   DatabaseAdapter,
   DeploymentCommitInput,
   DeploymentProposalInput,
+  MonitoringModeDeploymentInput,
+  MonitoringModeProposalInput,
+  TaskEditCommitInput,
   EnrichedAlertEvent,
   ExecutionLeaseRecord,
   TriggerCommitInput,
@@ -71,9 +75,128 @@ export function getDatabase(dbPath?: string): DatabaseSync {
   if (!hasColumn('agent_conversations', 'phase')) {
     instance.exec("ALTER TABLE agent_conversations ADD COLUMN phase TEXT NOT NULL DEFAULT 'DISCOVERY';");
   }
+  const conversationTable = instance.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agent_conversations'",
+  ).get() as { sql?: string } | undefined;
+  if (conversationTable?.sql && (!conversationTable.sql.includes('AWAITING_TRIGGER_MODE') || !conversationTable.sql.includes('CLARIFICATION_PENDING'))) {
+    // Older local databases have a CHECK constraint that predates the
+    // lifecycle-selection phase. SQLite cannot alter a CHECK in place, so
+    // rebuild only this small parent table while preserving all rows.
+    instance.exec('PRAGMA foreign_keys = OFF;');
+    instance.exec('BEGIN IMMEDIATE;');
+    try {
+      instance.exec(`
+        CREATE TABLE agent_conversations_new (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          title TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'ARCHIVED', 'SYNTHESIZED')),
+          phase TEXT NOT NULL DEFAULT 'DISCOVERY' CHECK (phase IN ('DISCOVERY', 'AWAITING_QUERY_CONFIRMATION', 'SCOUTING', 'AWAITING_TRIGGER_MODE', 'CLARIFICATION_PENDING', 'INTERRUPT_PENDING', 'DEPLOYED')),
+          created_at INTEGER NOT NULL
+        );
+        INSERT INTO agent_conversations_new (id, user_id, title, status, phase, created_at)
+          SELECT id, user_id, title, status, phase, created_at FROM agent_conversations;
+        DROP TABLE agent_conversations;
+        ALTER TABLE agent_conversations_new RENAME TO agent_conversations;
+      `);
+      instance.exec('COMMIT;');
+    } catch (error) {
+      try { instance.exec('ROLLBACK;'); } catch {}
+      throw error;
+    } finally {
+      instance.exec('PRAGMA foreign_keys = ON;');
+    }
+  }
+  const interruptTable = instance.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'interrupt_actions'",
+  ).get() as { sql?: string } | undefined;
+  if (interruptTable?.sql && (!interruptTable.sql.includes('conversation_id') || interruptTable.sql.includes('rule_id TEXT NOT NULL'))) {
+    // Add the nullable column first when the legacy table has no conversation
+    // routing metadata, allowing the rebuild below to preserve it uniformly.
+    if (!hasColumn('interrupt_actions', 'conversation_id')) {
+      instance.exec('ALTER TABLE interrupt_actions ADD COLUMN conversation_id TEXT;');
+    }
+    instance.exec('PRAGMA foreign_keys = OFF;');
+    instance.exec('BEGIN IMMEDIATE;');
+    try {
+      instance.exec(`
+        CREATE TABLE interrupt_actions_new (
+          id TEXT PRIMARY KEY,
+          alert_id TEXT REFERENCES alert_events(id) ON DELETE CASCADE,
+          rule_id TEXT REFERENCES rules(id) ON DELETE CASCADE,
+          conversation_id TEXT REFERENCES agent_conversations(id) ON DELETE CASCADE,
+          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          action_type TEXT NOT NULL,
+          action_payload TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED', 'EXPIRED')),
+          expires_at INTEGER,
+          created_at INTEGER NOT NULL,
+          resolved_at INTEGER
+        );
+        INSERT INTO interrupt_actions_new (
+          id, alert_id, rule_id, conversation_id, user_id, action_type, action_payload, status, expires_at, created_at, resolved_at
+        )
+          SELECT id, alert_id, rule_id, conversation_id, user_id, action_type, action_payload, status, expires_at, created_at, resolved_at
+          FROM interrupt_actions;
+        DROP TABLE interrupt_actions;
+        ALTER TABLE interrupt_actions_new RENAME TO interrupt_actions;
+      `);
+      instance.exec('COMMIT;');
+    } catch (error) {
+      try { instance.exec('ROLLBACK;'); } catch {}
+      throw error;
+    } finally {
+      instance.exec('PRAGMA foreign_keys = ON;');
+    }
+  }
+  const executionTable = instance.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'execution_leases'",
+  ).get() as { sql?: string } | undefined;
+  if (executionTable?.sql && !executionTable.sql.includes('WORKFLOW_RESUME')) {
+    // Extend the durable lease table for idempotent workflow resumes while
+    // preserving leases created by older local databases.
+    instance.exec('PRAGMA foreign_keys = OFF;');
+    instance.exec('BEGIN IMMEDIATE;');
+    try {
+      instance.exec(`
+        CREATE TABLE execution_leases_new (
+          id TEXT PRIMARY KEY,
+          event_type TEXT NOT NULL CHECK (event_type IN ('TICK', 'EVALUATE_RULE', 'WORKFLOW_RESUME')),
+          rule_id TEXT REFERENCES rules(id) ON DELETE SET NULL,
+          status TEXT NOT NULL CHECK (status IN ('RUNNING', 'SUCCEEDED', 'FAILED')),
+          lease_owner TEXT NOT NULL,
+          lease_expires_at INTEGER NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          result_payload TEXT,
+          last_error TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        INSERT INTO execution_leases_new (
+          id, event_type, rule_id, status, lease_owner, lease_expires_at, attempts, result_payload, last_error, created_at, updated_at
+        )
+          SELECT id, event_type, rule_id, status, lease_owner, lease_expires_at, attempts, result_payload, last_error, created_at, updated_at
+          FROM execution_leases;
+        DROP TABLE execution_leases;
+        ALTER TABLE execution_leases_new RENAME TO execution_leases;
+      `);
+      instance.exec('COMMIT;');
+    } catch (error) {
+      try { instance.exec('ROLLBACK;'); } catch {}
+      throw error;
+    } finally {
+      instance.exec('PRAGMA foreign_keys = ON;');
+    }
+  }
   if (!hasColumn('rules', 'last_triggered_at')) instance.exec('ALTER TABLE rules ADD COLUMN last_triggered_at INTEGER;');
   if (!hasColumn('sub_sentinels', 'schedule_shard')) instance.exec('ALTER TABLE sub_sentinels ADD COLUMN schedule_shard TEXT;');
   if (!hasColumn('sub_sentinels', 'next_evaluation_at')) instance.exec('ALTER TABLE sub_sentinels ADD COLUMN next_evaluation_at INTEGER;');
+  // Table rebuilds used for SQLite CHECK-constraint migrations drop indexes
+  // attached to the old table. Recreate the routing indexes idempotently.
+  instance.exec('CREATE INDEX IF NOT EXISTS idx_conversations_user_id ON agent_conversations(user_id);');
+  instance.exec('CREATE INDEX IF NOT EXISTS idx_interrupt_alert_id ON interrupt_actions(alert_id);');
+  instance.exec('CREATE INDEX IF NOT EXISTS idx_interrupt_status ON interrupt_actions(status);');
+  instance.exec('CREATE INDEX IF NOT EXISTS idx_execution_leases_status ON execution_leases(status);');
   instance.exec('CREATE INDEX IF NOT EXISTS idx_sub_sentinels_due ON sub_sentinels(next_evaluation_at, schedule_shard);');
   // Existing development databases may contain duplicate reads from the
   // pre-unique deduplication path. Keep the earliest row before enforcing the
@@ -393,12 +516,13 @@ export const sqliteRuleRepository = {
       if (input.interrupt) {
         db.prepare(`
           INSERT INTO interrupt_actions (
-            id, alert_id, rule_id, user_id, action_type, action_payload, status, expires_at, created_at, resolved_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            id, alert_id, rule_id, conversation_id, user_id, action_type, action_payload, status, expires_at, created_at, resolved_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           input.interrupt.id,
           input.interrupt.alert_id ?? null,
-          input.interrupt.rule_id,
+          input.interrupt.rule_id ?? null,
+          input.interrupt.conversation_id ?? null,
           input.interrupt.user_id,
           input.interrupt.action_type,
           input.interrupt.action_payload,
@@ -639,13 +763,14 @@ export const sqliteInterruptActionRepository = {
     const db = getDatabase();
     const stmt = db.prepare(`
       INSERT INTO interrupt_actions (
-        id, alert_id, rule_id, user_id, action_type, action_payload, status, expires_at, created_at, resolved_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        id, alert_id, rule_id, conversation_id, user_id, action_type, action_payload, status, expires_at, created_at, resolved_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     stmt.run(
       action.id,
       action.alert_id ?? null,
-      action.rule_id,
+      action.rule_id ?? null,
+      action.conversation_id ?? null,
       action.user_id,
       action.action_type,
       action.action_payload,
@@ -659,7 +784,11 @@ export const sqliteInterruptActionRepository = {
   getPendingByUserId(userId: string): EnrichedInterruptAction[] {
     const db = getDatabase();
     const stmt = db.prepare(`
-      SELECT i.*, r.conversation_id, r.title AS rule_title
+      SELECT
+        i.id, i.alert_id, i.rule_id, i.user_id, i.action_type, i.action_payload,
+        i.status, i.expires_at, i.created_at, i.resolved_at,
+        COALESCE(i.conversation_id, r.conversation_id) AS conversation_id,
+        r.title AS rule_title
       FROM interrupt_actions i
       LEFT JOIN rules r ON r.id = i.rule_id
       WHERE i.user_id = ? AND i.status = 'PENDING'
@@ -667,6 +796,27 @@ export const sqliteInterruptActionRepository = {
       ORDER BY i.created_at ASC
     `);
     return stmt.all(userId, Date.now()) as unknown as EnrichedInterruptAction[];
+  },
+
+  getLatestByConversationId(
+    conversationId: string,
+    actionType: string,
+    status: InterruptAction['status'],
+  ): EnrichedInterruptAction | null {
+    const db = getDatabase();
+    const stmt = db.prepare(`
+      SELECT
+        i.id, i.alert_id, i.rule_id, i.user_id, i.action_type, i.action_payload,
+        i.status, i.expires_at, i.created_at, i.resolved_at,
+        COALESCE(i.conversation_id, r.conversation_id) AS conversation_id,
+        r.title AS rule_title
+      FROM interrupt_actions i
+      LEFT JOIN rules r ON r.id = i.rule_id
+      WHERE i.conversation_id = ? AND i.action_type = ? AND i.status = ?
+      ORDER BY COALESCE(i.resolved_at, i.created_at) DESC
+      LIMIT 1
+    `);
+    return (stmt.get(conversationId, actionType, status) as unknown as EnrichedInterruptAction) || null;
   },
 
   getPending(): InterruptAction[] {
@@ -699,12 +849,28 @@ export const sqliteInterruptActionRepository = {
   getById(id: string): EnrichedInterruptAction | null {
     const db = getDatabase();
     const stmt = db.prepare(`
-      SELECT i.*, r.conversation_id, r.title AS rule_title
+      SELECT
+        i.id, i.alert_id, i.rule_id, i.user_id, i.action_type, i.action_payload,
+        i.status, i.expires_at, i.created_at, i.resolved_at,
+        COALESCE(i.conversation_id, r.conversation_id) AS conversation_id,
+        r.title AS rule_title
       FROM interrupt_actions i
       LEFT JOIN rules r ON r.id = i.rule_id
       WHERE i.id = ?
     `);
     return (stmt.get(id) as unknown as EnrichedInterruptAction) || null;
+  },
+
+  updateActionPayload(id: string, actionPayload: string): boolean {
+    const db = getDatabase();
+    const stmt = db.prepare(`
+      UPDATE interrupt_actions
+      SET action_payload = ?
+      WHERE id = ? AND status = 'PENDING'
+        AND (expires_at IS NULL OR expires_at > ?)
+    `);
+    const info = stmt.run(actionPayload, id, Date.now()) as { changes: number };
+    return info.changes > 0;
   },
 
   updateStatus(id: string, status: InterruptAction['status']): void {
@@ -723,6 +889,185 @@ export const sqliteInterruptActionRepository = {
     `);
     const info = stmt.run(status, now, id, now) as { changes: number };
     return info.changes > 0;
+  },
+
+  createClarification(input: {
+    action: InterruptAction;
+    conversationId: string;
+    userId: string;
+    expectedPhase: AgentConversation['phase'];
+    now: number;
+  }): boolean {
+    const db = getDatabase();
+    db.exec('BEGIN IMMEDIATE;');
+    try {
+      const conversation = db.prepare(
+        'SELECT user_id, phase FROM agent_conversations WHERE id = ?',
+      ).get(input.conversationId) as { user_id: string; phase: AgentConversation['phase'] } | undefined;
+      if (
+        !conversation ||
+        conversation.user_id !== input.userId ||
+        conversation.phase !== input.expectedPhase ||
+        !isChoiceInterruptActionType(input.action.action_type) ||
+        input.action.user_id !== input.userId ||
+        input.action.conversation_id !== input.conversationId ||
+        input.action.status !== 'PENDING'
+      ) {
+        db.exec('ROLLBACK;');
+        return false;
+      }
+
+      db.prepare(`
+        INSERT INTO interrupt_actions (
+          id, alert_id, rule_id, conversation_id, user_id, action_type, action_payload, status, expires_at, created_at, resolved_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, NULL)
+      `).run(
+        input.action.id,
+        input.action.alert_id ?? null,
+        input.action.rule_id ?? null,
+        input.conversationId,
+        input.userId,
+        input.action.action_type,
+        input.action.action_payload,
+        input.action.expires_at ?? null,
+        input.now,
+      );
+
+      const updated = db.prepare(`
+        UPDATE agent_conversations
+        SET phase = 'CLARIFICATION_PENDING'
+        WHERE id = ? AND user_id = ? AND phase = ?
+      `).run(input.conversationId, input.userId, input.expectedPhase) as { changes: number };
+      if (updated.changes !== 1) {
+        db.exec('ROLLBACK;');
+        return false;
+      }
+      db.exec('COMMIT;');
+      return true;
+    } catch (error) {
+      try { db.exec('ROLLBACK;'); } catch {}
+      throw error;
+    }
+  },
+
+  restorePendingClarification(input: {
+    interruptId: string;
+    conversationId: string;
+    userId: string;
+    now: number;
+  }): boolean {
+    const db = getDatabase();
+    db.exec('BEGIN IMMEDIATE;');
+    try {
+      const action = db.prepare(`
+        SELECT status, user_id, conversation_id, expires_at, action_type
+        FROM interrupt_actions
+        WHERE id = ?
+      `).get(input.interruptId) as {
+        status?: InterruptAction['status'];
+        user_id?: string;
+        conversation_id?: string | null;
+        expires_at?: number | null;
+        action_type?: string;
+      } | undefined;
+      const conversation = db.prepare(`
+        SELECT user_id, phase
+        FROM agent_conversations
+        WHERE id = ?
+      `).get(input.conversationId) as {
+        user_id?: string;
+        phase?: AgentConversation['phase'];
+      } | undefined;
+
+      if (
+        !action || action.status !== 'PENDING' ||
+        action.user_id !== input.userId || action.conversation_id !== input.conversationId ||
+        !isChoiceInterruptActionType(action.action_type || '') ||
+        (action.expires_at !== null && action.expires_at !== undefined && action.expires_at <= input.now) ||
+        !conversation || conversation.user_id !== input.userId
+      ) {
+        db.exec('ROLLBACK;');
+        return false;
+      }
+
+      if (conversation.phase === 'CLARIFICATION_PENDING') {
+        db.exec('COMMIT;');
+        return true;
+      }
+
+      const repairable = new Set<AgentConversation['phase']>([
+        'DISCOVERY',
+        'AWAITING_QUERY_CONFIRMATION',
+        'SCOUTING',
+        'AWAITING_TRIGGER_MODE',
+        'INTERRUPT_PENDING',
+      ]);
+      if (!conversation.phase || !repairable.has(conversation.phase)) {
+        db.exec('ROLLBACK;');
+        return false;
+      }
+
+      const updated = db.prepare(`
+        UPDATE agent_conversations
+        SET phase = 'CLARIFICATION_PENDING'
+        WHERE id = ? AND user_id = ? AND phase = ?
+      `).run(input.conversationId, input.userId, conversation.phase) as { changes: number };
+      if (updated.changes !== 1) {
+        db.exec('ROLLBACK;');
+        return false;
+      }
+      db.exec('COMMIT;');
+      return true;
+    } catch (error) {
+      try { db.exec('ROLLBACK;'); } catch {}
+      throw error;
+    }
+  },
+
+  resolveClarification(input: {
+    interruptId: string;
+    conversationId: string;
+    userId: string;
+    resolution: 'APPROVED' | 'REJECTED';
+    resumePhase: AgentConversation['phase'];
+    now: number;
+  }): boolean {
+    const db = getDatabase();
+    db.exec('BEGIN IMMEDIATE;');
+    try {
+      const updated = db.prepare(`
+        UPDATE interrupt_actions
+        SET status = ?, resolved_at = ?
+        WHERE id = ? AND conversation_id = ? AND user_id = ? AND status = 'PENDING'
+          AND (expires_at IS NULL OR expires_at > ?)
+      `).run(
+        input.resolution,
+        input.now,
+        input.interruptId,
+        input.conversationId,
+        input.userId,
+        input.now,
+      ) as { changes: number };
+      if (updated.changes !== 1) {
+        db.exec('ROLLBACK;');
+        return false;
+      }
+
+      const conversationUpdated = db.prepare(`
+        UPDATE agent_conversations
+        SET phase = ?
+        WHERE id = ? AND user_id = ? AND phase = 'CLARIFICATION_PENDING'
+      `).run(input.resumePhase, input.conversationId, input.userId) as { changes: number };
+      if (conversationUpdated.changes !== 1) {
+        db.exec('ROLLBACK;');
+        return false;
+      }
+      db.exec('COMMIT;');
+      return true;
+    } catch (error) {
+      try { db.exec('ROLLBACK;'); } catch {}
+      throw error;
+    }
   },
 };
 
@@ -773,12 +1118,13 @@ export const sqliteDeploymentRepository = {
 
       db.prepare(`
         INSERT INTO interrupt_actions (
-          id, alert_id, rule_id, user_id, action_type, action_payload, status, expires_at, created_at, resolved_at
-        ) VALUES (?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?)
+          id, alert_id, rule_id, conversation_id, user_id, action_type, action_payload, status, expires_at, created_at, resolved_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?)
       `).run(
         input.interrupt.id,
         input.interrupt.alert_id ?? null,
-        input.interrupt.rule_id,
+        input.interrupt.rule_id ?? null,
+        input.interrupt.conversation_id ?? input.conversationId,
         input.interrupt.user_id,
         input.interrupt.action_type,
         input.interrupt.action_payload,
@@ -797,6 +1143,98 @@ export const sqliteDeploymentRepository = {
         return false;
       }
 
+      db.exec('COMMIT;');
+      return true;
+    } catch (error) {
+      try { db.exec('ROLLBACK;'); } catch {}
+      throw error;
+    }
+  },
+
+  stageMonitoringMode(input: MonitoringModeProposalInput): boolean {
+    const db = getDatabase();
+    db.exec('BEGIN IMMEDIATE;');
+    try {
+      const conversation = db.prepare('SELECT user_id, phase FROM agent_conversations WHERE id = ?').get(input.conversationId) as
+        | { user_id: string; phase: AgentConversation['phase'] }
+        | undefined;
+      if (
+        !conversation ||
+        input.rule.conversation_id !== input.conversationId ||
+        input.rule.status !== 'PAUSED' ||
+        conversation.user_id !== input.rule.user_id ||
+        (conversation.phase !== 'SCOUTING' && conversation.phase !== 'AWAITING_TRIGGER_MODE') ||
+        db.prepare('SELECT 1 FROM rules WHERE id = ?').get(input.rule.id)
+      ) {
+        db.exec('ROLLBACK;');
+        return false;
+      }
+
+      db.prepare(`
+        INSERT INTO rules (
+          id, user_id, conversation_id, title, natural_language_intent, category, combinator, condition_tree,
+          trigger_mode, cooldown_minutes, audio_tone, status, expires_at, last_triggered_at, action_template, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PAUSED', ?, ?, ?, ?, ?)
+      `).run(
+        input.rule.id,
+        input.rule.user_id,
+        input.rule.conversation_id ?? null,
+        input.rule.title,
+        input.rule.natural_language_intent,
+        input.rule.category ?? 'FINANCIAL',
+        input.rule.combinator ?? 'SINGLE',
+        input.rule.condition_tree ?? null,
+        input.rule.trigger_mode ?? 'PERSISTENT',
+        input.rule.cooldown_minutes ?? 60,
+        input.rule.audio_tone ?? 'chime',
+        input.rule.expires_at ?? null,
+        input.rule.last_triggered_at ?? null,
+        input.rule.action_template ?? null,
+        input.rule.created_at ?? input.now,
+        input.now,
+      );
+
+      const upsertSub = db.prepare(`
+        INSERT INTO sub_sentinels (
+          id, rule_id, sentinel_type, target_source, operator, threshold, ttl_seconds,
+          last_evaluated_at, last_triggered_at, is_satisfied, satisfied_at, state_payload,
+          health_status, error_count, last_error, schedule_shard, next_evaluation_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          rule_id = excluded.rule_id, sentinel_type = excluded.sentinel_type,
+          target_source = excluded.target_source, operator = excluded.operator,
+          threshold = excluded.threshold, ttl_seconds = excluded.ttl_seconds,
+          schedule_shard = excluded.schedule_shard,
+          next_evaluation_at = excluded.next_evaluation_at
+      `);
+      for (const sub of input.subSentinels) {
+        const dueSchedule = getInitialDueSchedule(sub, input.now);
+        upsertSub.run(
+          sub.id, sub.rule_id, sub.sentinel_type, sub.target_source, sub.operator, sub.threshold,
+          sub.ttl_seconds, sub.last_evaluated_at ?? null, sub.last_triggered_at ?? null,
+          sub.is_satisfied ?? 0, sub.satisfied_at ?? null, sub.state_payload ?? null,
+          sub.health_status ?? 'HEALTHY', sub.error_count ?? 0, sub.last_error ?? null,
+          dueSchedule.schedule_shard ?? null, dueSchedule.next_evaluation_at ?? null,
+        );
+      }
+
+      const insertSeen = db.prepare(`
+        INSERT OR IGNORE INTO seen_events (id, sub_sentinel_id, source, event_hash, seen_at)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+      for (const event of input.baselineEvents) {
+        insertSeen.run(event.id, event.sub_sentinel_id, event.source, event.event_hash, input.now);
+      }
+
+      const updated = db.prepare(`
+        UPDATE agent_conversations
+        SET phase = 'AWAITING_TRIGGER_MODE'
+        WHERE id = ? AND user_id = ?
+      `).run(input.conversationId, input.rule.user_id) as { changes: number };
+      if (updated.changes !== 1) {
+        db.exec('ROLLBACK;');
+        return false;
+      }
       db.exec('COMMIT;');
       return true;
     } catch (error) {
@@ -881,6 +1319,189 @@ export const sqliteDeploymentRepository = {
         db.exec('ROLLBACK;');
         return false;
       }
+      db.exec('COMMIT;');
+      return true;
+    } catch (error) {
+      try { db.exec('ROLLBACK;'); } catch {}
+      throw error;
+    }
+  },
+
+  deployMonitoringMode(input: MonitoringModeDeploymentInput): boolean {
+    const db = getDatabase();
+    db.exec('BEGIN IMMEDIATE;');
+    try {
+      const updated = db.prepare(`
+        UPDATE rules
+        SET trigger_mode = ?, status = 'ACTIVE', updated_at = ?
+        WHERE id = ? AND user_id = ? AND conversation_id = ? AND status = 'PAUSED'
+      `).run(
+        input.triggerMode,
+        input.now,
+        input.ruleId,
+        input.userId,
+        input.conversationId,
+      ) as { changes: number };
+      if (updated.changes !== 1) {
+        db.exec('ROLLBACK;');
+        return false;
+      }
+
+      const conversationUpdated = db.prepare(`
+        UPDATE agent_conversations
+        SET status = 'SYNTHESIZED', phase = 'DEPLOYED'
+        WHERE id = ? AND user_id = ?
+      `).run(input.conversationId, input.userId) as { changes: number };
+      if (conversationUpdated.changes !== 1) {
+        db.exec('ROLLBACK;');
+        return false;
+      }
+      db.exec('COMMIT;');
+      return true;
+    } catch (error) {
+      try { db.exec('ROLLBACK;'); } catch {}
+      throw error;
+    }
+  },
+
+  /** Atomically applies a confirmed edit to an active deployed task. */
+  applyTaskEdit(input: TaskEditCommitInput): boolean {
+    const db = getDatabase();
+    db.exec('BEGIN IMMEDIATE;');
+    try {
+      const action = db.prepare(`
+        SELECT status, expires_at, user_id, conversation_id, rule_id
+        FROM interrupt_actions WHERE id = ?
+      `).get(input.interruptId) as {
+        status: InterruptAction['status'];
+        expires_at?: number | null;
+        user_id?: string;
+        conversation_id?: string | null;
+        rule_id?: string | null;
+      } | undefined;
+      if (
+        !action || action.status !== 'PENDING' || action.user_id !== input.userId ||
+        action.conversation_id !== input.conversationId || action.rule_id !== input.rule.id
+      ) {
+        db.exec('ROLLBACK;');
+        return false;
+      }
+      if (action.expires_at !== null && action.expires_at !== undefined && action.expires_at <= input.now) {
+        db.prepare("UPDATE interrupt_actions SET status = 'EXPIRED', resolved_at = ? WHERE id = ? AND status = 'PENDING'").run(input.now, input.interruptId);
+        db.exec('COMMIT;');
+        return false;
+      }
+
+      const currentRule = db.prepare(`
+        SELECT updated_at, user_id, conversation_id, status
+        FROM rules WHERE id = ?
+      `).get(input.rule.id) as {
+        updated_at?: number;
+        user_id?: string;
+        conversation_id?: string | null;
+        status?: Rule['status'];
+      } | undefined;
+      if (
+        !currentRule || currentRule.updated_at !== input.expectedRuleUpdatedAt ||
+        currentRule.user_id !== input.userId || currentRule.conversation_id !== input.conversationId ||
+        (currentRule.status !== 'ACTIVE' && currentRule.status !== 'TRIGGERED')
+      ) {
+        db.exec('ROLLBACK;');
+        return false;
+      }
+
+      const conversation = db.prepare(`
+        SELECT user_id, phase FROM agent_conversations WHERE id = ?
+      `).get(input.conversationId) as { user_id?: string; phase?: string } | undefined;
+      if (!conversation || conversation.user_id !== input.userId ||
+          (conversation.phase !== 'DEPLOYED' && conversation.phase !== 'CLARIFICATION_PENDING')) {
+        db.exec('ROLLBACK;');
+        return false;
+      }
+
+      const ruleUpdated = db.prepare(`
+        UPDATE rules SET
+          title = ?, natural_language_intent = ?, category = ?, combinator = ?, condition_tree = ?,
+          trigger_mode = ?, cooldown_minutes = ?, audio_tone = ?, status = ?, expires_at = ?,
+          last_triggered_at = ?, action_template = ?, updated_at = ?
+        WHERE id = ? AND user_id = ? AND conversation_id = ? AND updated_at = ?
+      `).run(
+        input.rule.title,
+        input.rule.natural_language_intent,
+        input.rule.category,
+        input.rule.combinator,
+        input.rule.condition_tree ?? null,
+        input.rule.trigger_mode,
+        input.rule.cooldown_minutes,
+        input.rule.audio_tone,
+        input.rule.status,
+        input.rule.expires_at ?? null,
+        input.rule.last_triggered_at ?? null,
+        input.rule.action_template ?? null,
+        input.rule.updated_at,
+        input.rule.id,
+        input.userId,
+        input.conversationId,
+        input.expectedRuleUpdatedAt,
+      ) as { changes: number };
+      if (ruleUpdated.changes !== 1) {
+        db.exec('ROLLBACK;');
+        return false;
+      }
+
+      for (const subSentinelId of input.deletedSubSentinelIds) {
+        const deleted = db.prepare('DELETE FROM sub_sentinels WHERE id = ? AND rule_id = ?').run(subSentinelId, input.rule.id) as { changes: number };
+        if (deleted.changes !== 1) {
+          db.exec('ROLLBACK;');
+          return false;
+        }
+      }
+
+      const upsertSub = db.prepare(`
+        INSERT INTO sub_sentinels (
+          id, rule_id, sentinel_type, target_source, operator, threshold, ttl_seconds,
+          last_evaluated_at, last_triggered_at, is_satisfied, satisfied_at, state_payload,
+          health_status, error_count, last_error, schedule_shard, next_evaluation_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          rule_id = excluded.rule_id, sentinel_type = excluded.sentinel_type,
+          target_source = excluded.target_source, operator = excluded.operator,
+          threshold = excluded.threshold, ttl_seconds = excluded.ttl_seconds,
+          last_evaluated_at = excluded.last_evaluated_at, last_triggered_at = excluded.last_triggered_at,
+          is_satisfied = excluded.is_satisfied, satisfied_at = excluded.satisfied_at,
+          state_payload = excluded.state_payload, health_status = excluded.health_status,
+          error_count = excluded.error_count, last_error = excluded.last_error,
+          schedule_shard = excluded.schedule_shard, next_evaluation_at = excluded.next_evaluation_at
+      `);
+      for (const sub of input.subSentinels) {
+        const dueSchedule = getInitialDueSchedule(sub, input.now);
+        upsertSub.run(
+          sub.id, sub.rule_id, sub.sentinel_type, sub.target_source, sub.operator, sub.threshold,
+          sub.ttl_seconds, sub.last_evaluated_at ?? null, sub.last_triggered_at ?? null,
+          sub.is_satisfied ?? 0, sub.satisfied_at ?? null, sub.state_payload ?? null,
+          sub.health_status ?? 'HEALTHY', sub.error_count ?? 0, sub.last_error ?? null,
+          dueSchedule.schedule_shard ?? null, dueSchedule.next_evaluation_at ?? null,
+        );
+      }
+
+      const conversationUpdated = db.prepare(`
+        UPDATE agent_conversations SET status = 'SYNTHESIZED', phase = 'DEPLOYED'
+        WHERE id = ? AND user_id = ?
+      `).run(input.conversationId, input.userId) as { changes: number };
+      if (conversationUpdated.changes !== 1) {
+        db.exec('ROLLBACK;');
+        return false;
+      }
+
+      const resolved = db.prepare(`
+        UPDATE interrupt_actions SET status = 'APPROVED', resolved_at = ?
+        WHERE id = ? AND status = 'PENDING' AND user_id = ? AND (expires_at IS NULL OR expires_at > ?)
+      `).run(input.now, input.interruptId, input.userId, input.now) as { changes: number };
+      if (resolved.changes !== 1) {
+        db.exec('ROLLBACK;');
+        return false;
+      }
+
       db.exec('COMMIT;');
       return true;
     } catch (error) {

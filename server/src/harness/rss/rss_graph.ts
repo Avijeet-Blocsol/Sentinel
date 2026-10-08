@@ -26,6 +26,11 @@ import {
 } from './types.js';
 import { getAgentDefaultModel } from '../../agent/sentinel_agent.js';
 import { Agent } from '@strands-agents/sdk';
+import {
+  extractSemanticQueryFields,
+  parseJsonValue,
+  type RssSemanticFields,
+} from '../../agent/structured_query_agent.js';
 
 /**
  * Extracts candidate filter keywords from natural language prompts.
@@ -159,36 +164,28 @@ export async function evaluateSemanticFilter(
           ? (response as any).toString()
           : '';
 
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) {
+      const parsedValue = parseJsonValue(text);
+      if (!parsedValue || typeof parsedValue !== 'object' || Array.isArray(parsedValue)) {
         throw new ProviderError(
           'BEDROCK',
           undefined,
-          `Semantic evaluation failed: model returned malformed output (no JSON found in "${text.slice(0, 80)}")`
+          `Semantic evaluation failed: model returned malformed output (no valid JSON object found in "${text.slice(0, 80)}")`
         );
       }
 
-      let parsed: any;
-      try {
-        parsed = JSON.parse(jsonMatch[0]);
-      } catch (jsonErr) {
-        throw new ProviderError(
-          'BEDROCK',
-          undefined,
-          `Semantic evaluation failed: invalid JSON in model response (${jsonErr instanceof Error ? jsonErr.message : String(jsonErr)})`
-        );
-      }
+      const parsed = parsedValue as { matches?: unknown };
 
-      if (!Array.isArray(parsed?.matches) || parsed.matches.length !== batch.length) {
+      const matches = Array.isArray(parsed.matches) ? parsed.matches : null;
+      if (!matches || matches.length !== batch.length) {
         throw new ProviderError(
           'BEDROCK',
           undefined,
-          `Semantic evaluation failed: matches array length (${parsed?.matches?.length}) does not match batch length (${batch.length})`
+          `Semantic evaluation failed: matches array length (${matches?.length ?? 0}) does not match batch length (${batch.length})`
         );
       }
 
       for (let j = 0; j < batch.length; j++) {
-        const val = parsed.matches[j];
+        const val = matches[j];
         if (typeof val !== 'boolean') {
           throw new ProviderError(
             'BEDROCK',
@@ -236,6 +233,11 @@ export async function* runRssPipeline(
 
   if (signal?.aborted) throw new Error('Research cancelled by user');
 
+  const semantic = await extractSemanticQueryFields<RssSemanticFields>('RSS', task.query, {
+    signal,
+    timeoutMs: Math.min(timeoutMs, 5000),
+  });
+
   // Validate expectedOperator: Reject unsupported operators for RSS feeds
   if (task.expectedOperator) {
     const supportedOperators = ['KEYWORD_MATCH', 'SEMANTIC_MATCH', 'EQUALS'];
@@ -260,11 +262,24 @@ export async function* runRssPipeline(
   }
 
   // Parse extracted keywords & parameters
-  const activeKeywords =
-    task.keywords && task.keywords.length > 0
-      ? task.keywords
-      : extractKeywordsFromQuery(task.query);
-  const matchMode = task.matchMode || 'ANY';
+  // An explicit semantic filter is already the user's authoritative
+  // criterion. Do not add speculative keywords inferred from the surrounding
+  // prose: doing so turns a semantic match into an accidental AND condition
+  // and can incorrectly return NOT_FOUND (for example, when the query says
+  // "... research" but matching article titles do not contain that word).
+  // Explicit task.keywords remain intentionally combinable with semantics.
+  // For an otherwise unqualified query, use only the deterministic parser's
+  // explicit keyword syntax; never turn an unconstrained model guess into a
+  // hidden filter on an otherwise valid feed.
+  const hasExplicitKeywords = Array.isArray(task.keywords) && task.keywords.length > 0;
+  const activeKeywords = hasExplicitKeywords
+    ? task.keywords!
+    : task.semanticFilter
+    ? []
+    : extractKeywordsFromQuery(task.query);
+  const matchMode = task.matchMode || semantic?.matchMode || 'ANY';
+  const effectiveAuthorFilter = task.authorFilter || semantic?.authorFilter;
+  const effectiveSemanticFilter = task.semanticFilter || semantic?.semanticFilter;
 
   yield {
     taskId,
@@ -275,7 +290,13 @@ export async function* runRssPipeline(
     timestamp: Date.now(),
   };
 
-  let candidateFeedUrl: string | null = task.feedUrl || null;
+  // A model may only promote a feed URL when the user actually supplied that
+  // URL. It may extract meaning, but it must not invent a network target.
+  const semanticFeedUrl =
+    typeof semantic?.feedUrl === 'string' && task.query.includes(semantic.feedUrl)
+      ? semantic.feedUrl
+      : null;
+  let candidateFeedUrl: string | null = task.feedUrl || semanticFeedUrl;
   let feedTitleOverride: string | null = null;
   let siteUrlOverride: string | null = null;
   let matchedRegistryEntry: CuratedFeedEntry | null = null;
@@ -603,21 +624,21 @@ export async function* runRssPipeline(
     data: {
       activeKeywords,
       matchMode,
-      authorFilter: task.authorFilter,
-      semanticFilter: task.semanticFilter,
+      authorFilter: effectiveAuthorFilter,
+      semanticFilter: effectiveSemanticFilter,
     },
     timestamp: Date.now(),
   };
 
   // Evaluate authorFilter if declared
-  if (task.authorFilter) {
-    const authorMatches = parsed.items.filter((item) => matchAuthor(item.author, task.authorFilter!));
+  if (effectiveAuthorFilter) {
+    const authorMatches = parsed.items.filter((item) => matchAuthor(item.author, effectiveAuthorFilter));
     if (authorMatches.length === 0) {
       return {
         status: 'NOT_FOUND',
         taskId,
         query: task.query,
-        reason: `Feed at ${targetFeedUrl} was reached with ${parsed.items.length} articles, but none matched author filter "${task.authorFilter}".`,
+        reason: `Feed at ${targetFeedUrl} was reached with ${parsed.items.length} articles, but none matched author filter "${effectiveAuthorFilter}".`,
         suggestion: 'Verify the author name or remove authorFilter.',
       };
     }
@@ -625,19 +646,19 @@ export async function* runRssPipeline(
 
   // Evaluate semanticFilter if declared
   let semanticMatches: boolean[] | undefined;
-  if (task.semanticFilter) {
+  if (effectiveSemanticFilter) {
     yield {
       taskId,
       executionId,
       step: 'SIMULATING_FILTER',
-      message: `Evaluating semantic filter "${task.semanticFilter}" across ${parsed.items.length} articles...`,
-      data: { semanticFilter: task.semanticFilter, itemCount: parsed.items.length },
+      message: `Evaluating semantic filter "${effectiveSemanticFilter}" across ${parsed.items.length} articles...`,
+      data: { semanticFilter: effectiveSemanticFilter, itemCount: parsed.items.length },
       timestamp: Date.now(),
     };
 
     try {
       if (config.semanticEvaluator) {
-        semanticMatches = await config.semanticEvaluator(parsed.items, task.semanticFilter);
+        semanticMatches = await config.semanticEvaluator(parsed.items, effectiveSemanticFilter);
         if (!Array.isArray(semanticMatches)) {
           throw new ProviderError(
             'SEMANTIC_EVALUATOR',
@@ -656,11 +677,11 @@ export async function* runRssPipeline(
             status: 'NOT_FOUND',
             taskId,
             query: task.query,
-            reason: `Semantic filter evaluation requested ("${task.semanticFilter}") but no Bedrock/LLM credentials are configured. Unsupported filter rejected.`,
+            reason: `Semantic filter evaluation requested ("${effectiveSemanticFilter}") but no Bedrock/LLM credentials are configured. Unsupported filter rejected.`,
             suggestion: 'Configure AWS Bedrock credentials or use keyword filtering instead.',
           };
         }
-        semanticMatches = await evaluateSemanticFilter(parsed.items, task.semanticFilter, undefined, signal);
+        semanticMatches = await evaluateSemanticFilter(parsed.items, effectiveSemanticFilter, undefined, signal);
       }
     } catch (semErr: unknown) {
       if (signal?.aborted) throw semErr;
@@ -688,7 +709,7 @@ export async function* runRssPipeline(
       const count = simulateKeywordFilter([item], activeKeywords, matchMode);
       if (count === 0) return false;
     }
-    if (task.authorFilter && !matchAuthor(item.author, task.authorFilter)) {
+    if (effectiveAuthorFilter && !matchAuthor(item.author, effectiveAuthorFilter)) {
       return false;
     }
     if (semanticMatches && !semanticMatches[idx]) {
@@ -702,8 +723,8 @@ export async function* runRssPipeline(
   // If user requested specific keyword/author/semantic filters and 0 historical items matched
   const hasSpecificFilters =
     (activeKeywords.length > 0 && !activeKeywords.includes('*')) ||
-    !!task.authorFilter ||
-    !!task.semanticFilter;
+    !!effectiveAuthorFilter ||
+    !!effectiveSemanticFilter;
 
   if (hasSpecificFilters && matchedHistoricalCount === 0) {
     return {
@@ -720,8 +741,8 @@ export async function* runRssPipeline(
     feedUrl: targetFeedUrl,
     keywords: activeKeywords.length > 0 ? activeKeywords : ['*'],
     matchMode,
-    authorFilter: task.authorFilter,
-    semanticFilter: task.semanticFilter,
+    authorFilter: effectiveAuthorFilter,
+    semanticFilter: effectiveSemanticFilter,
   };
 
   const dossier: RssFeedDossier = {
@@ -754,11 +775,11 @@ export async function* runRssPipeline(
   if (activeKeywords.length > 0 && !activeKeywords.includes('*')) {
     filterParts.push(`keywords [${activeKeywords.join(', ')}]`);
   }
-  if (task.authorFilter) {
-    filterParts.push(`author "${task.authorFilter}"`);
+  if (effectiveAuthorFilter) {
+    filterParts.push(`author "${effectiveAuthorFilter}"`);
   }
-  if (task.semanticFilter) {
-    filterParts.push(`semantic "${task.semanticFilter}"`);
+  if (effectiveSemanticFilter) {
+    filterParts.push(`semantic "${effectiveSemanticFilter}"`);
   }
   const filterDesc =
     filterParts.length > 0

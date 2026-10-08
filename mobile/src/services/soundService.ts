@@ -4,6 +4,7 @@
  */
 
 import type { AudioTone } from '@sentinel/shared';
+import { DEFAULT_ALERT_TONE, resolveAlertTone } from './alert_tone';
 
 let createAudioPlayer: any = null;
 let setAudioModeAsync: any = null;
@@ -45,12 +46,13 @@ async function configureAudio() {
   }
 }
 
-export async function playAlertTone(tone: AudioTone = 'chime') {
+export async function playAlertTone(tone?: AudioTone | string | null) {
+  const resolvedTone = resolveAlertTone(tone);
   await configureAudio();
 
   // 1. Trigger synchronized tactical haptic feedback
   if (Haptics?.notificationAsync) {
-    switch (tone) {
+    switch (resolvedTone) {
       case 'cash_register':
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
         break;
@@ -67,13 +69,19 @@ export async function playAlertTone(tone: AudioTone = 'chime') {
   // 2. Play ambient audio waveform using Expo SDK 57 expo-audio
   if (createAudioPlayer) {
     try {
-      const source = soundMap[tone] || soundMap.chime;
+      const source = soundMap[resolvedTone] || soundMap[DEFAULT_ALERT_TONE];
       if (source) {
         const player = createAudioPlayer(source);
+        let playbackSubscription: { remove?: () => void } | undefined;
+        playbackSubscription = player.addListener?.('playbackStatusUpdate', (status: { didJustFinish?: boolean }) => {
+          if (!status.didJustFinish) return;
+          playbackSubscription?.remove?.();
+          player.remove?.();
+        });
         player.play();
       }
     } catch (error) {
-      console.error(`[SoundService] Failed to play alert tone '${tone}':`, error);
+      console.error(`[SoundService] Failed to play alert tone '${resolvedTone}':`, error);
     }
   }
 }

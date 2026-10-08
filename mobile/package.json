@@ -4,6 +4,9 @@
   "main": "node_modules/expo/AppEntry.js",
   "scripts": {
     "start": "expo start",
+    "start:lan": "expo start --host lan",
+    "start:tunnel": "expo start --tunnel",
+    "start:e2e": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start_e2e.ps1",
     "android": "expo run:android",
     "prebuild:android": "expo prebuild --platform android",
     "ios": "expo run:ios",

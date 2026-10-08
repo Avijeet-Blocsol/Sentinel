@@ -30,6 +30,10 @@ if (infrastructureMode === 'local' && activeProvider !== 'sqlite') {
   throw new Error('Local infrastructure mode requires DATABASE_PROVIDER=sqlite');
 }
 
+if (process.env.NODE_ENV === 'production' && infrastructureMode !== 'aws') {
+  throw new Error('Production requires SENTINEL_INFRASTRUCTURE_MODE=aws; refusing local infrastructure');
+}
+
 if (infrastructureMode === 'aws' && process.env.NODE_ENV === 'production' && activeProvider !== 'dynamodb') {
   throw new Error('Production requires DATABASE_PROVIDER=dynamodb; refusing to start with SQLite');
 }

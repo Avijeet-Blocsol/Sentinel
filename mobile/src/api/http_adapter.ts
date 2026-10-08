@@ -4,7 +4,6 @@
  * and Zod runtime schema validation matching Fastify endpoints.
  */
 
-import { z } from 'zod';
 import {
   GetMeResponseSchema,
   type GetMeResponse,
@@ -14,7 +13,6 @@ import {
   type RegisterDeviceResponse,
   GetDevicesResponseSchema,
   type GetDevicesResponse,
-  ListConversationsQuerySchema,
   type ListConversationsQuery,
   ListConversationsResponseSchema,
   type ListConversationsResponse,
@@ -28,7 +26,6 @@ import {
   type GetConversationResponse,
   UpdateConversationStatusResponseSchema,
   type UpdateConversationStatusResponse,
-  ListRulesQuerySchema,
   type ListRulesQuery,
   ListRulesResponseSchema,
   type ListRulesResponse,
@@ -42,13 +39,11 @@ import {
   type GetPendingInterruptsResponse,
   GetInterruptResponseSchema,
   type GetInterruptResponse,
-  ListAlertsQuerySchema,
   type ListAlertsQuery,
   ListAlertsResponseSchema,
   type ListAlertsResponse,
   GetAlertResponseSchema,
   type GetAlertResponse,
-  type ConversationPhase,
 } from '@sentinel/shared';
 import { getApiBaseUrl, API_CONFIG } from './api_config';
 
@@ -66,7 +61,22 @@ export class HttpError extends Error {
   }
 }
 
-export type TokenProvider = () => Promise<string | null>;
+/**
+ * Cancellation is an expected lifecycle outcome on mobile (for example when
+ * a screen is left while its request is still in flight). Keep the transport
+ * marker available to UI callers so they can silently dispose of that work
+ * without hiding real HTTP, auth, timeout, or network failures.
+ */
+export function isCancellation(error: unknown): boolean {
+  return error instanceof HttpError && error.statusCode === 499;
+}
+
+export interface TokenRequestOptions {
+  /** Bypass Clerk's in-memory JWT cache after the API rejects a token. */
+  forceRefresh?: boolean;
+}
+
+export type TokenProvider = (options?: TokenRequestOptions) => Promise<string | null>;
 
 export interface HttpAdapterOptions {
   baseUrl?: string;
@@ -86,6 +96,7 @@ export class HttpAdapter {
   private getToken?: TokenProvider;
   private timeoutMs: number;
   private onUnauthorized?: () => void;
+  private tokenRefreshPromise: Promise<string | null> | null = null;
 
   constructor(options: HttpAdapterOptions = {}) {
     this.baseUrl = options.baseUrl || getApiBaseUrl();
@@ -103,6 +114,7 @@ export class HttpAdapter {
 
   public clearTokenProvider(): void {
     this.getToken = undefined;
+    this.tokenRefreshPromise = null;
   }
 
   public setUnauthorizedHandler(handler?: () => void): void {
@@ -134,33 +146,10 @@ export class HttpAdapter {
       throw new HttpError(499, 'Cancelled', `Request to ${endpoint} was cancelled`);
     }
 
-    // Every mobile API endpoint is private. Fail closed before making a network
-    // request if Clerk cannot provide a session JWT; a Clerk user id is not a
-    // bearer token and must never be used as one.
-    if (!headers.has('Authorization')) {
-      if (!this.getToken) {
-        this.onUnauthorized?.();
-        throw new HttpError(401, 'AuthenticationRequired', 'A Clerk session token is required');
-      }
 
-      let token: string | null;
-      try {
-        token = await this.getToken();
-      } catch (tokenErr) {
-        console.warn('[HttpAdapter] Failed to obtain Clerk session token:', tokenErr);
-        this.onUnauthorized?.();
-        throw new HttpError(401, 'AuthenticationRequired', 'Unable to obtain a Clerk session token');
-      }
+    const token = await this.obtainSessionToken(false);
+    headers.set('Authorization', `Bearer ${token}`);
 
-      if (!token?.trim()) {
-        this.onUnauthorized?.();
-        throw new HttpError(401, 'AuthenticationRequired', 'A Clerk session token is required');
-      }
-      headers.set('Authorization', `Bearer ${token.trim()}`);
-    }
-
-    // Token retrieval is asynchronous; the caller may have cancelled while
-    // Clerk was refreshing the session token.
     if (callerSignal?.aborted) {
       throw new HttpError(499, 'Cancelled', `Request to ${endpoint} was cancelled`);
     }
@@ -171,15 +160,26 @@ export class HttpAdapter {
     const timeoutTimer = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      const response = await fetch(url, {
-        ...fetchOptions,
-        headers,
-        signal: controller.signal,
-      });
+      const executeFetch = async () => {
+        const response = await fetch(url, {
+          ...fetchOptions,
+          headers,
+          signal: controller.signal,
+        });
+        const contentType = response.headers.get('content-type') || '';
+        const isJson = contentType.includes('application/json');
+        const data = isJson ? await response.json() : await response.text();
+        return { response, data };
+      };
 
-      const contentType = response.headers.get('content-type') || '';
-      const isJson = contentType.includes('application/json');
-      const data = isJson ? await response.json() : await response.text();
+      let { response, data } = await executeFetch();
+
+      if (response.status === 401) {
+        const refreshedToken = await this.obtainSessionToken(true);
+        headers.set('Authorization', `Bearer ${refreshedToken}`);
+        ({ response, data } = await executeFetch());
+      }
+
       if (!response.ok) {
         if (response.status === 401 && this.onUnauthorized) {
           this.onUnauthorized();
@@ -218,6 +218,37 @@ export class HttpAdapter {
     } finally {
       clearTimeout(timeoutTimer);
       callerSignal?.removeEventListener('abort', abortFromCaller);
+    }
+  }
+
+  private async obtainSessionToken(forceRefresh: boolean): Promise<string> {
+    if (!this.getToken) {
+      this.onUnauthorized?.();
+      throw new HttpError(401, 'AuthenticationRequired', 'A Clerk session token is required');
+    }
+
+    try {
+      const tokenPromise = forceRefresh
+        ? this.tokenRefreshPromise ?? this.getToken({ forceRefresh: true })
+        : this.getToken({ forceRefresh: false });
+
+      if (forceRefresh && !this.tokenRefreshPromise) {
+        this.tokenRefreshPromise = tokenPromise.finally(() => {
+          this.tokenRefreshPromise = null;
+        });
+      }
+
+      const token = await (forceRefresh ? this.tokenRefreshPromise! : tokenPromise);
+      if (!token?.trim()) {
+        this.onUnauthorized?.();
+        throw new HttpError(401, 'AuthenticationRequired', 'A Clerk session token is required');
+      }
+      return token.trim();
+    } catch (tokenErr) {
+      if (tokenErr instanceof HttpError) throw tokenErr;
+      console.warn('[HttpAdapter] Failed to obtain Clerk session token:', tokenErr);
+      this.onUnauthorized?.();
+      throw new HttpError(401, 'AuthenticationRequired', 'Unable to obtain a Clerk session token');
     }
   }
 

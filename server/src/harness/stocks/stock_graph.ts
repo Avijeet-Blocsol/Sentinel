@@ -20,6 +20,10 @@ import type {
   StockResearchOutcome,
   StockHarnessConfig,
 } from './types.js';
+import {
+  extractSemanticQueryFields,
+  type StockSemanticFields,
+} from '../../agent/structured_query_agent.js';
 
 const STOCK_ALIASES: Record<string, string> = {
   apple: 'AAPL',
@@ -387,6 +391,74 @@ export function parseStockQuery(task: StockResearchTask): ParsedStockQuery {
   };
 }
 
+/**
+ * Semantically enriches a free-form stock query with Strands before applying
+ * the existing deterministic parser and provider validation. Explicit task
+ * fields always win over model-proposed fields.
+ */
+export async function parseStockQueryWithAgent(
+  task: StockResearchTask,
+  options?: { signal?: AbortSignal; timeoutMs?: number }
+): Promise<ParsedStockQuery> {
+  const semantic = await extractSemanticQueryFields<StockSemanticFields>('STOCK', task.query, options);
+  if (!semantic) return parseStockQuery(task);
+
+  const enriched: StockResearchTask = { ...task };
+  const validIndicators = new Set<TechnicalIndicator>([
+    'SMA', 'EMA', 'WMA', 'WEMA', 'RSI', 'MACD', 'BOLLINGER_BANDS', 'BOLLINGER',
+    'KELTNER_CHANNELS', 'STOCHASTIC', 'STOCHASTIC_RSI', 'CCI', 'ATR', 'ADX', 'ROC',
+    'AWESOME_OSCILLATOR', 'TRIX', 'WILLIAMS_R', 'VOLUME', 'OBV', 'MFI', 'VWAP',
+    'PSAR', 'ICHIMOKU_CLOUD', 'PRICE',
+  ]);
+  const validPatterns = new Set<CandlestickPattern>([
+    'BULLISH_ENGULFING', 'BULLISH_HAMMER', 'BULLISH_INVERTED_HAMMER', 'BULLISH_HARAMI',
+    'BULLISH_HARAMI_CROSS', 'BULLISH_MARUBOZU', 'MORNING_STAR', 'MORNING_DOJI_STAR',
+    'DRAGONFLY_DOJI', 'BEARISH_ENGULFING', 'BEARISH_HAMMER', 'BEARISH_INVERTED_HAMMER',
+    'BEARISH_HARAMI', 'BEARISH_HARAMI_CROSS', 'BEARISH_MARUBOZU', 'EVENING_STAR',
+    'EVENING_DOJI_STAR', 'GRAVESTONE_DOJI', 'DARK_CLOUD_COVER', 'SHOOTING_STAR', 'DOJI',
+  ]);
+  const validTimeframes = new Set<NonNullable<StockResearchTask['timeframe']>>([
+    '1m', '5m', '15m', '30m', '1h', '4h', '1d', '1w',
+  ]);
+  const validOperators = new Set<SentinelOperator>([
+    'GREATER_THAN', 'LESS_THAN', 'CROSSES_ABOVE', 'CROSSES_BELOW', 'TOUCHES',
+    'CLOSES_ABOVE', 'CLOSES_BELOW', 'EQUALS', 'PERCENT_CHANGE',
+  ]);
+
+  if (!enriched.ticker && typeof semantic.ticker === 'string' && semantic.ticker.trim()) {
+    enriched.ticker = semantic.ticker.trim().toUpperCase();
+  }
+  if (!enriched.targetType && (semantic.targetType === 'PRICE' || semantic.targetType === 'INDICATOR' || semantic.targetType === 'CANDLESTICK')) {
+    enriched.targetType = semantic.targetType;
+  }
+  if (!enriched.indicator && typeof semantic.indicator === 'string' && validIndicators.has(semantic.indicator as TechnicalIndicator)) {
+    enriched.indicator = semantic.indicator as TechnicalIndicator;
+  }
+  if (!enriched.candlestickPattern && typeof semantic.candlestickPattern === 'string' && validPatterns.has(semantic.candlestickPattern as CandlestickPattern)) {
+    enriched.candlestickPattern = semantic.candlestickPattern as CandlestickPattern;
+  }
+  if (!enriched.timeframe && typeof semantic.timeframe === 'string' && validTimeframes.has(semantic.timeframe as NonNullable<StockResearchTask['timeframe']>)) {
+    enriched.timeframe = semantic.timeframe as NonNullable<StockResearchTask['timeframe']>;
+  }
+  if (!enriched.expectedOperator && typeof semantic.expectedOperator === 'string' && validOperators.has(semantic.expectedOperator as SentinelOperator)) {
+    enriched.expectedOperator = semantic.expectedOperator as SentinelOperator;
+  }
+  if (enriched.period === undefined && Number.isInteger(semantic.period) && Number(semantic.period) > 0 && Number(semantic.period) <= 1000) {
+    enriched.period = Number(semantic.period);
+  }
+  if (enriched.targetValue === undefined && typeof semantic.targetValue === 'number' && Number.isFinite(semantic.targetValue)) {
+    enriched.targetValue = semantic.targetValue;
+  }
+  if (enriched.marketHoursOnly === undefined && typeof semantic.marketHoursOnly === 'boolean') {
+    enriched.marketHoursOnly = semantic.marketHoursOnly;
+  }
+  if (!enriched.currency && typeof semantic.currency === 'string' && /^[A-Za-z]{3,8}$/.test(semantic.currency)) {
+    enriched.currency = semantic.currency.toUpperCase();
+  }
+
+  return parseStockQuery(enriched);
+}
+
 export function getTimeframeGranularity(timeframe: string): {
   finnhubResolution: string;
   yahooInterval: string;
@@ -450,7 +522,10 @@ export async function* runStockPipeline(
 
   if (signal?.aborted) throw new Error('Research cancelled by user');
 
-  const parsed = parseStockQuery(task);
+  const parsed = await parseStockQueryWithAgent(task, {
+    signal,
+    timeoutMs: Math.min(5000, Math.max(1000, config.timeoutMs ?? 5000)),
+  });
 
   // Emit warning events for any text conflicts with explicit structured inputs
   for (const warning of parsed.warnings) {

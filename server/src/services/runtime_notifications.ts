@@ -6,14 +6,16 @@
  * clients rehydrate from the API and offline clients receive best-effort push.
  */
 
-import type { AlertEvent, EnrichedInterruptAction, InterruptAction } from '@sentinel/shared';
+import type { AlertEvent, EnrichedInterruptAction, InterruptAction, TelemetryPoint } from '@sentinel/shared';
 import { ruleRepository } from '../db/index.js';
-import { type EvaluatorEngine } from './evaluators/engine.js';
+import { type EvaluatorEngine, type SubSentinelEvaluatedEventPayload } from './evaluators/engine.js';
 import { sendUserPushNotification } from './notifications/push_notifications.js';
 
 export interface RuntimeEventPublisher {
   publishAlert?: (alert: AlertEvent) => void;
   publishInterrupt?: (interrupt: EnrichedInterruptAction) => void;
+  publishSubSentinelEvaluated?: (userId: string, event: SubSentinelEvaluatedEventPayload) => void;
+  publishTelemetry?: (userId: string, point: TelemetryPoint) => void;
 }
 
 function reportDeliveryFailure(channel: string, error: unknown): void {
@@ -27,9 +29,9 @@ async function deliverInterrupt(
   let ruleTitle: string | null = null;
   let conversationId: string | null = null;
   try {
-    const rule = await ruleRepository.getById(interrupt.rule_id);
+    const rule = interrupt.rule_id ? await ruleRepository.getById(interrupt.rule_id) : null;
     ruleTitle = rule?.title ?? null;
-    conversationId = rule?.conversation_id ?? null;
+    conversationId = interrupt.conversation_id ?? rule?.conversation_id ?? null;
   } catch (error) {
     reportDeliveryFailure('interrupt enrichment', error);
   }
@@ -81,6 +83,20 @@ export function configureEvaluatorNotifications(
     },
     onInterruptRequest: (interrupt) => {
       void deliverInterrupt(interrupt, publisher).catch((error) => reportDeliveryFailure('interrupt', error));
+    },
+    onSubSentinelEvaluated: (userId, event) => {
+      try {
+        publisher.publishSubSentinelEvaluated?.(userId, event);
+      } catch (error) {
+        reportDeliveryFailure('realtime sub-sentinel event', error);
+      }
+    },
+    onTelemetryUpdate: (userId, point) => {
+      try {
+        publisher.publishTelemetry?.(userId, point);
+      } catch (error) {
+        reportDeliveryFailure('realtime telemetry', error);
+      }
     },
   });
 }

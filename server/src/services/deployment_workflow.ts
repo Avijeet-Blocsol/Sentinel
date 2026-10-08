@@ -3,22 +3,25 @@
  *
  * Transport handlers may render cards and messages, but this module owns the
  * persistence boundaries: staging a proposal, registering its scheduler, and
- * resolving the human approval gate.
+ * committing the selected lifecycle mode.
  */
 
 import { createHash, randomUUID } from 'node:crypto';
 import {
   RuleSchema,
   SubSentinelSchema,
+  SubSentinelThresholdSchema,
   parseConditionTree,
   type ConditionNode,
   type EnrichedInterruptAction,
   type InterruptAction,
   type Rule,
   type SubSentinel,
+  type TriggerMode,
 } from '@sentinel/shared';
 import {
   chatMessageRepository,
+  conversationRepository,
   deploymentRepository,
   interruptActionRepository,
   ruleRepository,
@@ -26,6 +29,7 @@ import {
 } from '../db/index.js';
 import { ensureConfiguredScheduler } from '../execution/scheduler_registration.js';
 import { usesAwsInfrastructure } from '../config/infrastructure_mode.js';
+import { parseJsonValue } from '../agent/structured_query_agent.js';
 
 export interface SynthesizedRuleBundle {
   rule?: Rule;
@@ -34,10 +38,32 @@ export interface SynthesizedRuleBundle {
   baselineSeeds?: string[];
 }
 
+const MAX_BASELINE_SEEDS = 50;
+const MAX_BASELINE_SEED_LENGTH = 512;
+
+/** Bound provider/model supplied baseline data before it reaches a durable
+ * transaction or interrupt payload. This keeps RSS feeds and malformed model
+ * output from exceeding DynamoDB transaction/item limits. */
+export function normalizeBaselineSeeds(seeds: readonly unknown[]): string[] {
+  return [...new Set(seeds
+    .map((seed) => String(seed).trim())
+    .filter(Boolean)
+    .map((seed) => seed.slice(0, MAX_BASELINE_SEED_LENGTH)))]
+    .slice(0, MAX_BASELINE_SEEDS);
+}
+
 export interface DeploymentResolution {
   messageId: string | null;
   message: string;
   rule: Rule | null;
+  subSentinels: SubSentinel[];
+  resolvedAt: number;
+  alreadyResolved: boolean;
+}
+
+export interface MonitoringModeResolution {
+  message: string;
+  rule: Rule;
   subSentinels: SubSentinel[];
   resolvedAt: number;
   alreadyResolved: boolean;
@@ -87,6 +113,21 @@ function collectConditionTreeReferences(node: ConditionNode, references = new Se
   return references;
 }
 
+/** Baseline events are seeded while the rule is PAUSED, so the first live
+ * evaluation cannot replay values observed during pre-flight. */
+export function buildBaselineEvents(
+  subSentinels: SubSentinel[],
+  seeds: string[],
+): Array<{ id: string; sub_sentinel_id: string; source: string; event_hash: string }> {
+  const uniqueSeeds = normalizeBaselineSeeds(seeds);
+  return subSentinels.flatMap((sub) => uniqueSeeds.map((seed) => ({
+    id: createHash('sha256').update(`${sub.id}_${seed}`).digest('hex'),
+    sub_sentinel_id: sub.id,
+    source: sub.target_source,
+    event_hash: seed,
+  })));
+}
+
 /** Parse a model-generated fenced JSON bundle at the strict persistence boundary. */
 export function extractSynthesizedRule(
   text: string,
@@ -97,10 +138,8 @@ export function extractSynthesizedRule(
     // Capture the complete fenced payload. A non-greedy `{...}` match stops
     // at the first nested object and therefore corrupts every realistic
     // multi-sentinel/condition-tree synthesis.
-    const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-    if (!jsonMatch) return {};
-
-    const parsed = JSON.parse(jsonMatch[1]) as Record<string, unknown>;
+    const parsedValue = parseJsonValue(text);
+    const parsed = parsedValue as Record<string, unknown> | null;
     if (!parsed || typeof parsed !== 'object') return {};
     if (typeof parsed.title !== 'string' || typeof parsed.natural_language_intent !== 'string') return {};
     if (!Array.isArray(parsed.sub_sentinels) || parsed.sub_sentinels.length === 0) return {};
@@ -112,17 +151,50 @@ export function extractSynthesizedRule(
     for (const [index, candidate] of parsed.sub_sentinels.entries()) {
       if (!candidate || typeof candidate !== 'object') return {};
       const rawSub = candidate as Record<string, unknown>;
+      // Never turn an incomplete model bundle into a live watcher by filling
+      // operational fields with guessed values. A missing target/operator,
+      // threshold, or cadence must fail the persistence boundary closed.
+      const sentinelType = rawSub.sentinel_type ?? rawSub.sentinelType;
+      const targetSource = rawSub.target_source ?? rawSub.targetSource ?? rawSub.ticker;
+      const operator = rawSub.operator;
+      const rawThreshold = rawSub.threshold;
+      const ttlSeconds = rawSub.ttl_seconds;
+      if (
+        typeof sentinelType !== 'string' || !sentinelType.trim() ||
+        typeof targetSource !== 'string' || !targetSource.trim() ||
+        typeof operator !== 'string' || !operator.trim() ||
+        rawThreshold === undefined || rawThreshold === null ||
+        ttlSeconds === undefined || ttlSeconds === null
+      ) return {};
+      const serializedThreshold = typeof rawThreshold === 'string'
+        ? rawThreshold
+        : JSON.stringify(rawThreshold);
+      if (!serializedThreshold || serializedThreshold === 'undefined') return {};
+      const thresholdObject = parseJsonValue(serializedThreshold);
+      if (!thresholdObject || typeof thresholdObject !== 'object' || Array.isArray(thresholdObject)) return {};
+      const thresholdCurrency = (thresholdObject as Record<string, unknown>).currency;
+      // A crypto price is meaningless without its explicit quote unit. The
+      // shared threshold schema historically defaulted this to USD; the
+      // persistence boundary must not silently change the user's task.
+      if (sentinelType.toUpperCase() === 'CRYPTO' &&
+          !(typeof thresholdCurrency === 'string' && Boolean(thresholdCurrency.trim()))) {
+        return {};
+      }
+      const thresholdResult = SubSentinelThresholdSchema.safeParse(thresholdObject);
+      if (!thresholdResult.success) return {};
+      // Persist the schema-normalized threshold, not the raw model object.
+      // This strips unsupported fields (such as an unverified alternate URL)
+      // before evaluators or later edits can act on them.
+      const canonicalThreshold = JSON.stringify(thresholdResult.data);
       const subSentinelId = randomUUID();
       const subResult = SubSentinelSchema.safeParse({
         id: subSentinelId,
         rule_id: ruleId,
-        sentinel_type: rawSub.sentinel_type ?? 'STOCK',
-        target_source: rawSub.target_source ?? rawSub.ticker ?? 'MARKET',
-        operator: rawSub.operator ?? 'GREATER_THAN',
-        threshold: typeof rawSub.threshold === 'string'
-          ? rawSub.threshold
-          : JSON.stringify(rawSub.threshold ?? rawSub),
-        ttl_seconds: rawSub.ttl_seconds ?? 300,
+        sentinel_type: sentinelType,
+        target_source: targetSource,
+        operator,
+        threshold: canonicalThreshold,
+        ttl_seconds: ttlSeconds,
         health_status: 'HEALTHY',
         error_count: 0,
         is_satisfied: 0,
@@ -164,8 +236,13 @@ export function extractSynthesizedRule(
 
     // A multi-watcher rule without a boolean relationship would otherwise
     // inherit SINGLE and silently ignore all but its first child.
-    const combinator = parsed.combinator
-      ?? (conditionTree ? 'SINGLE' : subSentinels.length === 1 ? 'SINGLE' : undefined);
+    // Some model responses describe a single condition-tree leaf as the
+    // combinator itself (`LEAF`). `LEAF` is an AST node, not a rule combinator;
+    // normalize that unambiguous single-watcher shape before schema validation.
+    const combinator = parsed.combinator === 'LEAF' && conditionTree
+      ? 'SINGLE'
+      : parsed.combinator
+        ?? (conditionTree ? 'SINGLE' : subSentinels.length === 1 ? 'SINGLE' : undefined);
     if (!conditionTree && (subSentinels.length > 1) &&
         (combinator !== 'AND' && combinator !== 'OR')) return {};
 
@@ -189,7 +266,7 @@ export function extractSynthesizedRule(
     if (!ruleResult.success) return {};
 
     const baselineSeeds = Array.isArray(parsed.baseline_seeds)
-      ? parsed.baseline_seeds.map((value) => String(value))
+      ? normalizeBaselineSeeds(parsed.baseline_seeds)
       : [];
     const rawBaselineValue = parsed.baseline_value ?? parsed.current_value;
     if (rawBaselineValue !== undefined && rawBaselineValue !== null) {
@@ -200,7 +277,7 @@ export function extractSynthesizedRule(
       rule: ruleResult.data,
       subSentinels,
       baselineValue: rawBaselineValue === undefined || rawBaselineValue === null ? undefined : String(rawBaselineValue),
-      baselineSeeds,
+      baselineSeeds: normalizeBaselineSeeds(baselineSeeds),
     };
   } catch {
     return {};
@@ -240,12 +317,24 @@ export async function stageDeploymentProposal(input: {
       rule,
       subSentinels: input.subSentinels,
       baselineSeeds: input.baselineSeeds?.length
-        ? input.baselineSeeds
+        ? normalizeBaselineSeeds(input.baselineSeeds)
         : input.subSentinels.map((sub) => `${sub.target_source}_${input.baselineValue || 'baseline'}`),
       title: rule.title,
       summary: `Watch ${rule.title} with audio tone "${rule.audio_tone}".`,
       baselineValue: input.baselineValue || 'Live pre-flight verified',
       cadence: 'Checked every 1 minute ($0.00 cost)',
+      choices: [
+        {
+          id: 'approve',
+          label: 'Confirm & deploy',
+          description: 'Activate this verified Sentinel monitor.',
+        },
+        {
+          id: 'reject',
+          label: 'Dismiss',
+          description: 'Discard this proposed monitor.',
+        },
+      ],
     }),
     status: 'PENDING',
     expires_at: now + 15 * 60 * 1000,
@@ -268,6 +357,130 @@ export async function stageDeploymentProposal(input: {
   };
 }
 
+/** Atomically stage a PAUSED rule and its watchers while awaiting lifecycle selection. */
+export async function stageMonitoringModeProposal(input: {
+  rule: Rule;
+  subSentinels: SubSentinel[];
+  baselineValue?: string;
+  baselineSeeds?: string[];
+}): Promise<boolean> {
+  const rule: Rule = { ...input.rule, status: 'PAUSED', updated_at: Date.now() };
+  if (!rule.conversation_id) {
+    throw new Error('A monitoring-mode proposal requires a conversation');
+  }
+  const seeds = input.baselineSeeds?.length
+    ? normalizeBaselineSeeds(input.baselineSeeds)
+    : input.subSentinels.map((sub) => `${sub.target_source}_${input.baselineValue || 'baseline'}`);
+  const staged = await deploymentRepository.stageMonitoringMode({
+    conversationId: rule.conversation_id,
+    rule,
+    subSentinels: input.subSentinels,
+    baselineEvents: buildBaselineEvents(input.subSentinels, seeds),
+    now: Date.now(),
+  });
+  if (staged) return true;
+
+  // Cross-process retries can lose the conditional transaction after the
+  // first worker has already committed the exact same staged proposal. Treat
+  // that state as idempotent; a genuinely different phase/owner remains a
+  // hard failure.
+  const existingRule = await ruleRepository.getById(rule.id);
+  const conversation = await conversationRepository.getById(rule.conversation_id);
+  if (existingRule && conversation?.phase === 'AWAITING_TRIGGER_MODE' &&
+      existingRule.user_id === rule.user_id &&
+      existingRule.conversation_id === rule.conversation_id &&
+      existingRule.status === 'PAUSED') {
+    return true;
+  }
+  return false;
+}
+
+/** Commit the user's lifecycle choice and make the staged rule evaluator-visible. */
+export async function deployMonitoringModeProposal(input: {
+  conversationId: string;
+  userId: string;
+  ruleId: string;
+  triggerMode: TriggerMode;
+}): Promise<MonitoringModeResolution> {
+  const stagedRule = await ruleRepository.getById(input.ruleId);
+  if (
+    !stagedRule ||
+    stagedRule.user_id !== input.userId ||
+    stagedRule.conversation_id !== input.conversationId ||
+    (stagedRule.status !== 'PAUSED' && stagedRule.status !== 'ACTIVE')
+  ) {
+    throw new Error('Monitoring-mode proposal is missing or does not belong to this conversation');
+  }
+
+  if (stagedRule.status === 'ACTIVE') {
+    if (stagedRule.trigger_mode !== input.triggerMode) {
+      throw new Error('This Sentinel task has already been deployed with a different monitoring mode');
+    }
+    return {
+      message: `This Sentinel task is already deployed for ${input.triggerMode === 'PERSISTENT' ? 'continuous monitoring' : 'one-time alerting'}.`,
+      rule: stagedRule,
+      subSentinels: await subSentinelRepository.getByRuleId(stagedRule.id),
+      resolvedAt: Date.now(),
+      alreadyResolved: true,
+    };
+  }
+
+  // Revalidate the durable bundle at the final lifecycle boundary. Older
+  // local builds could have left a paused rule with a schema-defaulted crypto
+  // threshold; never activate one without an explicit quote currency.
+  const stagedSubSentinels = await subSentinelRepository.getByRuleId(stagedRule.id);
+  for (const sub of stagedSubSentinels) {
+    const rawThreshold = parseJsonValue(sub.threshold);
+    if (sub.sentinel_type === 'CRYPTO' &&
+        (!rawThreshold || typeof rawThreshold !== 'object' || Array.isArray(rawThreshold) ||
+          !(typeof (rawThreshold as Record<string, unknown>).currency === 'string' &&
+            Boolean(((rawThreshold as Record<string, unknown>).currency as string).trim())))) {
+      throw new Error('Monitoring-mode deployment requires an explicit crypto quote currency');
+    }
+    if (!SubSentinelThresholdSchema.safeParse(rawThreshold).success) {
+      throw new Error('Monitoring-mode deployment contains an invalid condition threshold');
+    }
+  }
+
+  await ensureExecutionSchedulerRegistered();
+  const committed = await deploymentRepository.deployMonitoringMode({
+    conversationId: input.conversationId,
+    userId: input.userId,
+    ruleId: input.ruleId,
+    triggerMode: input.triggerMode,
+    now: Date.now(),
+  });
+  if (!committed) {
+    const current = await ruleRepository.getById(input.ruleId);
+    if (current?.status === 'ACTIVE' && current.trigger_mode === input.triggerMode) {
+      return {
+        message: `This Sentinel task is already deployed for ${input.triggerMode === 'PERSISTENT' ? 'continuous monitoring' : 'one-time alerting'}.`,
+        rule: current,
+        subSentinels: await subSentinelRepository.getByRuleId(current.id),
+        resolvedAt: Date.now(),
+        alreadyResolved: true,
+      };
+    }
+    throw new Error('Monitoring-mode proposal is no longer awaiting a lifecycle choice');
+  }
+
+  const deployedRule = await ruleRepository.getById(input.ruleId);
+  if (!deployedRule) throw new Error('Deployed Sentinel task could not be reloaded');
+  return {
+    message:
+      `✅ **Sentinel Task Deployed!**\n\n` +
+      `Your watcher **"${deployedRule.title}"** is now configured for ` +
+      `${input.triggerMode === 'PERSISTENT' ? 'continuous monitoring' : 'a one-time alert'}. ` +
+      (input.triggerMode === 'PERSISTENT'
+        ? 'It will continue evaluating future observations until you stop it.'
+        : 'It will finish after the first committed alert.'),
+    rule: deployedRule,
+    subSentinels: await subSentinelRepository.getByRuleId(deployedRule.id),
+    resolvedAt: Date.now(),
+    alreadyResolved: false,
+  };
+}
+
 /** Return an idempotent no-op result without appending another chat completion. */
 async function getPreviouslyResolvedResult(input: {
   interruptId: string;
@@ -284,7 +497,7 @@ async function getPreviouslyResolvedResult(input: {
     return null;
   }
   if (current.status === 'APPROVED') {
-    const rule = await ruleRepository.getById(current.rule_id);
+    const rule = current.rule_id ? await ruleRepository.getById(current.rule_id) : null;
     return {
       messageId: null,
       message: 'This confirmation was already approved. The watcher remains active.',
@@ -348,7 +561,21 @@ export async function resolveDeploymentProposal(input: {
       if (!subResult.success) {
         throw new Error('Approved deployment contains an invalid sub-sentinel');
       }
-      subSentinels.push(subResult.data);
+      const rawThreshold = parseJsonValue(subResult.data.threshold);
+      if (subResult.data.sentinel_type === 'CRYPTO' &&
+          (!rawThreshold || typeof rawThreshold !== 'object' || Array.isArray(rawThreshold) ||
+            !(typeof (rawThreshold as Record<string, unknown>).currency === 'string' &&
+              Boolean(((rawThreshold as Record<string, unknown>).currency as string).trim())))) {
+        throw new Error('Approved deployment requires an explicit crypto quote currency');
+      }
+      const thresholdResult = SubSentinelThresholdSchema.safeParse(rawThreshold);
+      if (!thresholdResult.success) {
+        throw new Error('Approved deployment contains an invalid threshold');
+      }
+      subSentinels.push({
+        ...subResult.data,
+        threshold: JSON.stringify(thresholdResult.data),
+      });
     }
     if (subSentinels.some((sub) => sub.rule_id !== rule.id)) {
       throw new Error('Approved deployment contains a sub-sentinel for another rule');
@@ -356,8 +583,8 @@ export async function resolveDeploymentProposal(input: {
 
     await ensureExecutionSchedulerRegistered();
     const seeds = Array.isArray(parsedPayload.baselineSeeds) && parsedPayload.baselineSeeds.length > 0
-      ? [...new Set(parsedPayload.baselineSeeds.map((seed) => String(seed)))]
-      : [String(parsedPayload.baselineValue ?? 'initial_baseline')];
+      ? normalizeBaselineSeeds(parsedPayload.baselineSeeds)
+      : normalizeBaselineSeeds([String(parsedPayload.baselineValue ?? 'initial_baseline')]);
     const baselineEvents = subSentinels.flatMap((sub) => seeds.map((seed) => ({
       id: createHash('sha256').update(`${sub.id}_${seed}`).digest('hex'),
       sub_sentinel_id: sub.id,

@@ -44,8 +44,8 @@ Example request:
 - Active, paused, triggered, and archived watcher lifecycles.
 - Telemetry history, alert history, audio feedback, and haptics.
 - Durable execution leases, cooldowns, retries, and idempotency.
-- Local-first demo mode using SQLite and an embedded evaluator.
-- A planned production path using DynamoDB, EventBridge Scheduler, SQS, and S3.
+- Production execution on DynamoDB, S3, EventBridge Scheduler, and SQS.
+- An explicitly selected local development mode using SQLite and the embedded evaluator.
 
 ## Architecture
 
@@ -56,13 +56,15 @@ flowchart LR
     Agent --> Tools[Concurrent research tools]
     Tools --> Proposal[Validated rule proposal]
     Proposal --> Approval{Human approval}
-    Approval -->|Approved| Store[(SQLite)]
-    Store --> Evaluator[Embedded deterministic evaluator]
+    Approval -->|Approved| Store[(DynamoDB)]
+    Store --> Scheduler[EventBridge Scheduler]
+    Scheduler --> Queue[SQS]
+    Queue --> Evaluator[Bounded evaluator worker]
     Evaluator --> Alerts[Telemetry, audio, alerts]
     Alerts --> User
 ```
 
-This is the current architecture. It runs locally and does **not** use live DynamoDB, SQS, EventBridge, or S3 resources. Those services are planned production next steps. Amazon Bedrock is configured separately as a model provider.
+This is the production architecture. Production startup refuses local infrastructure, SQLite, embedded evaluation, missing S3 session storage, and missing scheduler/worker configuration. Local SQLite mode remains available only when explicitly selected for development. Amazon Bedrock is configured separately as the production model provider.
 
 ## Technology Stack
 
@@ -74,9 +76,9 @@ This is the current architecture. It runs locally and does **not** use live Dyna
 | Server | Node.js, Fastify, TypeScript, WebSockets |
 | Validation | Zod and generated JSON Schema |
 | Authentication | Clerk |
-| Local persistence | SQLite |
-| Planned AWS persistence | DynamoDB and S3 |
-| Planned AWS execution | EventBridge Scheduler and SQS |
+| Development persistence | SQLite |
+| Production persistence | DynamoDB and S3 |
+| Production execution | EventBridge Scheduler and SQS |
 
 ## Repository Layout
 
@@ -88,7 +90,7 @@ Strands/
 └── README.md
 ```
 
-## Local Demo Setup
+## Local Development Setup
 
 ### Prerequisites
 
@@ -108,13 +110,14 @@ npm install --prefix mobile
 
 ### 2. Configure the server
 
-Copy `server/.env.example` to `server/.env`, then provide the required Clerk and model credentials. Keep these values for a local demo:
+Copy `server/.env.example` to `server/.env`, provide the required Clerk and model credentials, and explicitly select local development:
 
 ```dotenv
 SENTINEL_INFRASTRUCTURE_MODE=local
 DATABASE_PROVIDER=sqlite
 DATABASE_PATH=./data/sentinel.db
 RUN_EMBEDDED_EVALUATOR=true
+NODE_ENV=development
 ```
 
 For Amazon Bedrock, set `SENTINEL_MODEL_PROVIDER=bedrock`, choose an AWS region, and provide credentials through the standard AWS credential chain. To use OpenAI instead, set `SENTINEL_MODEL_PROVIDER=openai` and provide `OPENAI_API_KEY`.
@@ -136,7 +139,7 @@ Use `10.0.2.2` instead of `localhost` for an Android emulator. For a physical de
 From the repository root, start the local server:
 
 ```bash
-npm run demo:server
+npm run server:dev
 ```
 
 In another terminal, start Expo:
@@ -174,17 +177,9 @@ npx tsx tests/production_readiness.test.ts
 npx tsx tests/agentic_flow.test.ts
 ```
 
-## Planned AWS Infrastructure Next Steps
+## Production Configuration
 
-The application currently uses SQLite, local Strands session storage, and the embedded evaluator. Amazon DynamoDB, Amazon S3, Amazon EventBridge Scheduler, and Amazon SQS are **not live dependencies or deployed parts of the demo**.
-
-My next production milestone is to:
-
-- Move rule and execution state from SQLite to DynamoDB.
-- Move Strands session storage from the local filesystem to S3.
-- Use EventBridge Scheduler for durable recurring cadence.
-- Deliver scheduled work through SQS to bounded evaluator workers.
-- Add production IAM roles, dead-letter queues, monitoring, and deployment verification.
+Production requires `NODE_ENV=production`, `SENTINEL_INFRASTRUCTURE_MODE=aws`, and `DATABASE_PROVIDER=dynamodb`. Set `AWS_S3_SESSION_BUCKET`, the EventBridge Scheduler/SQS topology, `ENGINE_API_SECRET` or `SENTINEL_SERVICE_SECRET`, `WS_TICKET_SECRET`, and valid Clerk credentials. The API process must not run the embedded evaluator; start the SQS worker separately.
 
 ## Security Notes
 

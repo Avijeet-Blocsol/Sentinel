@@ -16,6 +16,10 @@ import {
 } from '../../harness/deep_web_search/types.js';
 import { safeFetch } from '../../harness/deep_web_search/security/safe_fetch.js';
 import { isPrivateIp, safeResolveDns, validateAndCanonicalizeUrl } from '../../harness/deep_web_search/security/url_validator.js';
+import {
+  extractSemanticQueryFields,
+  type PageStateSemanticFields,
+} from '../../agent/structured_query_agent.js';
 
 /**
  * ==========================================================
@@ -288,10 +292,10 @@ export function normalizeValue(
       // Standardize stock and availability states or check user-specified allowed vocabulary
       const upper = trimmed.toUpperCase();
       if (/in\s*stock|available|order\s*now|buy\s*now/i.test(trimmed)) {
-        return { normalized: 'IN_STOCK', regex: '(?i)(in\\s*stock|available)', isValid: true };
+        return { normalized: 'IN_STOCK', regex: '(in\\s*stock|available)', isValid: true };
       }
       if (/out\s*of\s*stock|sold\s*out|backorder|pre-order|unavailable/i.test(trimmed)) {
-        return { normalized: 'OUT_OF_STOCK', regex: '(?i)(out\\s*of\\s*stock|sold\\s*out)', isValid: true };
+        return { normalized: 'OUT_OF_STOCK', regex: '(out\\s*of\\s*stock|sold\\s*out)', isValid: true };
       }
 
       if (allowedVocabulary && allowedVocabulary.length > 0) {
@@ -399,6 +403,52 @@ export function evaluateElementCandidate(params: {
     normalizedValue: normResult.normalized,
     valueRegex: normResult.regex,
   };
+}
+
+/**
+ * Extends deterministic candidate validation only for ambiguous categorical
+ * page text. Security, placeholder, decoy, numeric, and selector checks stay
+ * deterministic; Strands is used solely to understand availability language
+ * such as "ships in two days" or "preorder open".
+ */
+async function evaluateElementCandidateWithAgent(
+  params: Parameters<typeof evaluateElementCandidate>[0],
+  signal?: AbortSignal
+): Promise<ReturnType<typeof evaluateElementCandidate>> {
+  const deterministic = evaluateElementCandidate(params);
+  if (
+    deterministic.isValid ||
+    params.targetDataKind !== 'CATEGORICAL' ||
+    deterministic.isDecoy ||
+    deterministic.isPlaceholder ||
+    signal?.aborted
+  ) {
+    return deterministic;
+  }
+
+  const semantic = await extractSemanticQueryFields<PageStateSemanticFields>('PAGE_STATE', [
+    `Element text: ${params.rawText}`,
+    `Parent context: ${params.parentText || ''}`,
+    `CSS classes: ${(params.classes || []).join(' ')}`,
+  ].join('\n'), { signal, timeoutMs: 2000 });
+
+  if (
+    semantic?.state &&
+    semantic.state !== 'UNKNOWN' &&
+    typeof semantic.confidence === 'number' &&
+    Number.isFinite(semantic.confidence) &&
+    semantic.confidence >= 0.75
+  ) {
+    return {
+      ...deterministic,
+      isValid: true,
+      normalizedValue: semantic.state,
+      valueRegex: null,
+      rejectionReason: undefined,
+    };
+  }
+
+  return deterministic;
 }
 
 /**
@@ -952,14 +1002,14 @@ export async function verifySelector(
         const parentText = targetEl.parent().text().toLowerCase();
 
         // Points 6 & 7: Evaluate element using shared deterministic validation
-        const evalResult = evaluateElementCandidate({
+        const evalResult = await evaluateElementCandidateWithAgent({
           rawText,
           classes,
           parentText,
           targetDataKind,
           matchedCount: matches.length,
           selector,
-        });
+        }, options.signal);
 
         const diagnostics: SelectorExecutionDiagnostics = {
           selector,
@@ -1137,14 +1187,14 @@ export async function verifySelector(
     browser = null;
 
     if (evalData && evalData.rawText) {
-      const evalResult = evaluateElementCandidate({
+      const evalResult = await evaluateElementCandidateWithAgent({
         rawText: evalData.rawText,
         classes: evalData.classes,
         parentText: evalData.parentText,
         targetDataKind,
         matchedCount: 1,
         selector,
-      });
+      }, options.signal);
 
       const diagnostics: SelectorExecutionDiagnostics = {
         selector,

@@ -35,6 +35,16 @@ export interface EvaluatorEngineOptions {
   intervalMs?: number;
   onAlertTriggered?: (alert: AlertEvent) => void;
   onInterruptRequest?: (interrupt: InterruptAction) => void;
+  onSubSentinelEvaluated?: (userId: string, event: SubSentinelEvaluatedEventPayload) => void;
+  onTelemetryUpdate?: (userId: string, point: TelemetryPoint) => void;
+}
+
+export interface SubSentinelEvaluatedEventPayload {
+  subSentinelId: string;
+  ruleId: string;
+  isSatisfied: boolean;
+  currentValue: string | number | boolean;
+  timestamp: number;
 }
 
 export class EvaluatorEngine {
@@ -45,11 +55,15 @@ export class EvaluatorEngine {
   private readonly intervalMs: number;
   private onAlertTriggered?: (alert: AlertEvent) => void;
   private onInterruptRequest?: (interrupt: InterruptAction) => void;
+  private onSubSentinelEvaluated?: (userId: string, event: SubSentinelEvaluatedEventPayload) => void;
+  private onTelemetryUpdate?: (userId: string, point: TelemetryPoint) => void;
 
   constructor(options: EvaluatorEngineOptions = {}) {
     this.intervalMs = options.intervalMs || 10000; // Default: 10s poll tick
     this.onAlertTriggered = options.onAlertTriggered;
     this.onInterruptRequest = options.onInterruptRequest;
+    this.onSubSentinelEvaluated = options.onSubSentinelEvaluated;
+    this.onTelemetryUpdate = options.onTelemetryUpdate;
 
     // Register evaluator adapters. Individual adapters may use deterministic
     // comparisons, agentic semantic judgment, or both.
@@ -77,11 +91,15 @@ export class EvaluatorEngine {
   public setEventCallbacks(callbacks: {
     onAlertTriggered?: (alert: AlertEvent) => void;
     onInterruptRequest?: (interrupt: InterruptAction) => void;
+    onSubSentinelEvaluated?: (userId: string, event: SubSentinelEvaluatedEventPayload) => void;
+    onTelemetryUpdate?: (userId: string, point: TelemetryPoint) => void;
   }) {
     // Explicit replacement prevents stale process-local callbacks from a
     // previous bootstrap path leaking into a new runtime configuration.
     this.onAlertTriggered = callbacks.onAlertTriggered;
     this.onInterruptRequest = callbacks.onInterruptRequest;
+    this.onSubSentinelEvaluated = callbacks.onSubSentinelEvaluated;
+    this.onTelemetryUpdate = callbacks.onTelemetryUpdate;
   }
 
   /**
@@ -181,6 +199,20 @@ export class EvaluatorEngine {
       await telemetryRepository.log(telemetryPoint);
     } catch {
       // Telemetry log error non-fatal
+    }
+
+    const evaluatedEvent: SubSentinelEvaluatedEventPayload = {
+      subSentinelId: subSentinel.id,
+      ruleId: rule.id,
+      isSatisfied: result.isSatisfied,
+      currentValue: result.observedValue ?? (result.isSatisfied ? true : false),
+      timestamp: telemetryPoint.timestamp,
+    };
+    try {
+      this.onSubSentinelEvaluated?.(rule.user_id, evaluatedEvent);
+      this.onTelemetryUpdate?.(rule.user_id, telemetryPoint);
+    } catch {
+      // Realtime delivery is best effort; durable evaluation must continue.
     }
 
     return result;

@@ -6,6 +6,7 @@ import {
   type SentinelExecutionEvent,
   type SentinelExecutionResult,
 } from './contracts.js';
+import { classifyExecutionFailure, SentinelExecutionError } from './errors.js';
 
 export async function runSentinelExecution(
   rawEvent: unknown,
@@ -37,7 +38,11 @@ export async function runSentinelExecution(
     if (event.eventType === 'TICK') {
       const tick = await engine.tick(event.now || Date.now(), limit);
       if (tick.failures > 0) {
-        throw new Error(`TICK_PARTIAL_FAILURE:${tick.failures}`);
+        throw new SentinelExecutionError(
+          'PARTIAL_EVALUATION',
+          `Tick completed with ${tick.failures} evaluator failure(s)`,
+          true
+        );
       }
       result = {
         eventId: event.eventId,
@@ -47,9 +52,21 @@ export async function runSentinelExecution(
         triggeredRules: tick.triggeredRules,
       };
     } else {
-      if (!event.ruleId) throw new Error('EVALUATE_RULE events require ruleId');
+      if (!event.ruleId) {
+        throw new SentinelExecutionError(
+          'INVALID_EVENT',
+          'EVALUATE_RULE events require ruleId',
+          false
+        );
+      }
       const rule = await ruleRepository.getById(event.ruleId);
-      if (!rule) throw new Error(`Rule not found: ${event.ruleId}`);
+      if (!rule) {
+        throw new SentinelExecutionError(
+          'RULE_NOT_FOUND',
+          `Rule not found: ${event.ruleId}`,
+          false
+        );
+      }
       const evaluation = await engine.evaluateRule(rule, forceEvaluateChildren);
       result = {
         eventId: event.eventId,
@@ -61,12 +78,12 @@ export async function runSentinelExecution(
     await executionRepository.complete(event.eventId, owner, JSON.stringify(result));
     return result;
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    const retryable = !/invalid|not found|schema|unauthorized|forbidden/i.test(message);
+    const failure = classifyExecutionFailure(error);
+    const message = `[${failure.code}] ${failure.message}`;
     try {
-      await executionRepository.fail(event.eventId, owner, message, retryable);
+      await executionRepository.fail(event.eventId, owner, message, failure.retryable);
     } catch {}
-    if (retryable) throw error;
+    if (failure.retryable) throw error;
     return { eventId: event.eventId, eventType: event.eventType, status: 'FAILED', error: message };
   }
 }

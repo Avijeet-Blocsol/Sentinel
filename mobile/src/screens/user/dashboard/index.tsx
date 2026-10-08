@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { View, StatusBar, Pressable, RefreshControl, StyleSheet } from 'react-native';
+import { useEffect, useMemo, useState } from 'react';
+import { View, StatusBar, Pressable, RefreshControl } from 'react-native';
 import { useUser } from '@clerk/expo';
 import {
   Screen,
@@ -22,10 +22,11 @@ import {
 } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { useSentinel } from '@/hooks/use_sentinel';
+import { isCancellation } from '@/api/http_adapter';
+import { resolveAlertTone } from '@/services/alert_tone';
 import { SentinelCard } from '@/components/sentinel_card';
 import { InterruptCard } from '@/components/interrupt_card';
-import { LightPillar } from '../components/light_pillar';
-import { LoadingOrb } from '../components/loading_orb';
+import { GridScan } from '../components/grid_scan';
 
 type DashboardTab = 'sentinels' | 'interrupts' | 'notifications';
 type SentinelFilter = 'ALL' | 'ACTIVE' | 'PAUSED' | 'TRIGGERED';
@@ -37,7 +38,6 @@ export function DashboardScreen({
   onBack?: () => void;
   onOpenConversation?: (conversationId: string, title?: string) => void;
 }) {
-  const insets = useSafeAreaInsets();
   const { user } = useUser();
   const {
     rules,
@@ -52,6 +52,7 @@ export function DashboardScreen({
   const [activeTab, setActiveTab] = useState<DashboardTab>('sentinels');
   const [sentinelFilter, setSentinelFilter] = useState<SentinelFilter>('ALL');
   const [selectedRuleId, setSelectedRuleId] = useState<string | null>(null);
+  const insets = useSafeAreaInsets();
 
   const refreshing = dashboardStatus === 'REFRESHING';
 
@@ -59,6 +60,7 @@ export function DashboardScreen({
   // app root by useSentinelBootstrap, not reconfigured by individual screens.
   useEffect(() => {
     void syncDashboard().catch((err) => {
+      if (isCancellation(err)) return;
       console.warn('[DashboardScreen] Failed to sync dashboard:', err);
     });
     // Alerts are produced by a separate SQS worker and a dashboard may be
@@ -66,6 +68,7 @@ export function DashboardScreen({
     // visible so the feed is still current in that legitimate state.
     const refreshTimer = setInterval(() => {
       void syncDashboard().catch((err) => {
+        if (isCancellation(err)) return;
         console.warn('[DashboardScreen] Background refresh failed:', err);
       });
     }, 15_000);
@@ -74,7 +77,11 @@ export function DashboardScreen({
 
   const handleRefresh = async () => {
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    await syncDashboard();
+    try {
+      await syncDashboard();
+    } catch (err) {
+      if (!isCancellation(err)) throw err;
+    }
   };
 
   const userFirstName = user?.firstName || user?.fullName?.split(' ')[0] || 'User';
@@ -116,45 +123,17 @@ export function DashboardScreen({
     setActiveTab(tab);
   };
 
-  const memoizedLightPillar = useMemo(
-    () => (
-      <View style={[StyleSheet.absoluteFill, { zIndex: 0 }]} pointerEvents="none">
-        <LightPillar
-          topColor="#00F0FF"
-          bottomColor="#0DF272"
-          intensity={0.9}
-          rotationSpeed={0.2}
-          glowAmount={0.004}
-          pillarWidth={2.2}
-          pillarHeight={0.35}
-          noiseIntensity={0.35}
-          pillarRotation={25}
-          interactive={false}
-          quality="medium"
-        />
-      </View>
-    ),
-    [],
-  );
-
   return (
-    <Screen edges={['top', 'left', 'right', 'bottom']} className="flex-1 bg-[#050505]">
+    <Screen edges={['top', 'left', 'right', 'bottom']} className="flex-1 bg-transparent" style={{ backgroundColor: 'transparent' }}>
       <StatusBar barStyle="light-content" backgroundColor="#050505" />
 
-      {/* Matching 3D Ambient Background */}
-      {memoizedLightPillar}
-
-      {/* Ambient WebGL Loading Orb at bottom-left corner of the screen */}
-      <LoadingOrb
-        preset="Neon"
-        size={160}
-        style={{
-          position: 'absolute',
-          bottom: Math.max(insets.bottom, 16),
-          left: 10,
-          zIndex: 0,
-          pointerEvents: 'none',
-        }}
+      <GridScan
+        borderWidth={0}
+        scanDuration={2.0}
+        scanDelay={4.0}
+        scanColor="#0DF272"
+        linesColor="#062814"
+        scanOpacity={0.75}
       />
 
       {/* 1. Top Header Matching Home Screen */}
@@ -230,7 +209,7 @@ export function DashboardScreen({
 
       {/* 2. Top Segmented Filter Buttons: Sentinels, Interrupts, Notifications */}
       <View className="px-5 pt-1 pb-3 z-10">
-        <View className="flex-row items-center bg-[#1E1F22] rounded-2xl p-1 border border-zinc-800">
+        <View className="flex-row items-center bg-[#1E1F22]/90 rounded-2xl p-1 border border-zinc-800">
           {/* Sentinels Button */}
           <Pressable
             onPress={() => {
@@ -413,7 +392,10 @@ export function DashboardScreen({
       {/* 3. Main Scrollable Content */}
       <ScrollView
         className="flex-1 px-5"
-        contentContainerStyle={{ paddingBottom: 40 }}
+        // Keep the last card/actions above Android's navigation area and the
+        // home indicator on iOS. A fixed padding value clips on devices with
+        // larger bottom insets.
+        contentContainerStyle={{ paddingBottom: Math.max(56, insets.bottom + 32) }}
         showsVerticalScrollIndicator={false}
         showsHorizontalScrollIndicator={false}
         refreshControl={
@@ -502,7 +484,7 @@ export function DashboardScreen({
                   <View className="items-end gap-1">
                     <Badge variant="outline" className="border-emerald-500/40 py-0.5 px-2 bg-emerald-950/30">
                       <Text className="text-[10px] font-mono text-[#0DF272] uppercase font-bold">
-                        🔔 {alert.audio_tone}
+                        🔔 {resolveAlertTone(alert.audio_tone)}
                       </Text>
                     </Badge>
                     <Text variant="muted" className="text-[10px] font-mono text-zinc-500">

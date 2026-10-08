@@ -21,6 +21,10 @@ import type {
   CryptoResearchOutcome,
   CryptoHarnessConfig,
 } from './types.js';
+import {
+  extractSemanticQueryFields,
+  type CryptoSemanticFields,
+} from '../../agent/structured_query_agent.js';
 
 const COIN_ALIASES: Record<string, string> = {
   bitcoin: 'BTC',
@@ -49,17 +53,134 @@ const COIN_ALIASES: Record<string, string> = {
   shib: 'SHIB',
 };
 
-const CRYPTO_STOP_WORDS = new Set([
-  'alert', 'notify', 'me', 'when', 'if', 'crypto', 'cryptocurrency', 'token', 'tokens', 'coin', 'coins',
-  'price', 'crosses', 'drops', 'falls', 'rises', 'breaks', 'above', 'below', 'dips',
-  'under', 'over', 'at', 'hits', 'reaches', 'target', 'value', 'monitor', 'track',
-  'buy', 'sell', 'swap', 'pool', 'chart', 'indicator', 'day', 'hour', 'daily',
-  'the', 'a', 'an', 'is', 'to', 'for', 'my', 'current', 'latest', 'liquidity',
-  'check', 'watch', 'watching', 'trading'
+const QUOTE_CURRENCY_ALIASES: Record<string, string> = {
+  '$': 'USD',
+  'DOLLAR': 'USD',
+  'DOLLARS': 'USD',
+  'US DOLLAR': 'USD',
+  'US DOLLARS': 'USD',
+  'U.S. DOLLAR': 'USD',
+  'U.S. DOLLARS': 'USD',
+  'EURO': 'EUR',
+  'EUROS': 'EUR',
+  'POUND': 'GBP',
+  'POUNDS': 'GBP',
+  'BRITISH POUND': 'GBP',
+  'BRITISH POUNDS': 'GBP',
+  'CANADIAN DOLLAR': 'CAD',
+  'CANADIAN DOLLARS': 'CAD',
+  'JAPANESE YEN': 'JPY',
+  'AUSTRALIAN DOLLAR': 'AUD',
+  'AUSTRALIAN DOLLARS': 'AUD',
+  'SOUTH KOREAN WON': 'KRW',
+};
+
+const CRYPTO_OPERATOR_ALIASES: Record<string, SentinelOperator> = {
+  ABOVE: 'GREATER_THAN',
+  OVER: 'GREATER_THAN',
+  GREATER: 'GREATER_THAN',
+  '>': 'GREATER_THAN',
+  '>=': 'GREATER_THAN',
+  'RISES ABOVE': 'GREATER_THAN',
+  'REACHES ABOVE': 'GREATER_THAN',
+  BELOW: 'LESS_THAN',
+  UNDER: 'LESS_THAN',
+  LESS: 'LESS_THAN',
+  '<': 'LESS_THAN',
+  '<=': 'LESS_THAN',
+  'DROPS BELOW': 'LESS_THAN',
+  'FALLS BELOW': 'LESS_THAN',
+};
+
+const VALID_CRYPTO_OPERATORS = new Set<SentinelOperator>([
+  'GREATER_THAN',
+  'LESS_THAN',
+  'CROSSES_ABOVE',
+  'CROSSES_BELOW',
+  'TOUCHES',
+  'CLOSES_ABOVE',
+  'CLOSES_BELOW',
+  'EQUALS',
+  'PERCENT_CHANGE',
 ]);
+
+export function normalizeQuoteCurrency(value?: string): string {
+  if (!value?.trim()) return 'USD';
+  const normalized = value.trim().toUpperCase().replaceAll('-', ' ').replaceAll('_', ' ');
+  return QUOTE_CURRENCY_ALIASES[normalized] ?? normalized;
+}
+
+function normalizeCryptoAssetSymbol(value?: string): string {
+  if (!value?.trim()) return '';
+  const normalized = value.trim().toLowerCase();
+  return COIN_ALIASES[normalized] ?? value.trim().toUpperCase();
+}
+
+function normalizeCryptoOperator(value?: string): SentinelOperator | undefined {
+  if (!value?.trim()) return undefined;
+  const normalized = value.trim().toUpperCase();
+  const canonical = normalized.replaceAll('-', '_').replaceAll(' ', '_');
+  if (VALID_CRYPTO_OPERATORS.has(canonical as SentinelOperator)) {
+    return canonical as SentinelOperator;
+  }
+  return CRYPTO_OPERATOR_ALIASES[normalized] ?? CRYPTO_OPERATOR_ALIASES[canonical];
+}
+
+/**
+ * Resolve only the operator wording from the user's natural-language query.
+ * Asset identity and numeric thresholds remain model/structured-field owned;
+ * this narrow guard prevents a semantic model from turning a plain threshold
+ * such as "rises above 75k" into a historical crossing requirement.
+ */
+export function inferCryptoQueryOperator(query?: string): SentinelOperator | undefined {
+  if (!query?.trim()) return undefined;
+  const normalized = query.toUpperCase().replace(/[\u2018\u2019]/g, "'");
+
+  if (/\bCROS(?:S|SES|SED|SING)\s+(?:ABOVE|OVER)\b/.test(normalized)) {
+    return 'CROSSES_ABOVE';
+  }
+  if (/\bCROS(?:S|SES|SED|SING)\s+(?:BELOW|UNDER)\b/.test(normalized)) {
+    return 'CROSSES_BELOW';
+  }
+  if (/\b(?:ABOVE|OVER|GREATER\s+THAN|AT\s+LEAST|RISES?\s+ABOVE|REACHES?\s+ABOVE|GOES?\s+ABOVE)\b/.test(normalized)) {
+    return 'GREATER_THAN';
+  }
+  if (/\b(?:BELOW|UNDER|LESS\s+THAN|AT\s+MOST|DROPS?\s+BELOW|FALLS?\s+BELOW|GOES?\s+BELOW)\b/.test(normalized)) {
+    return 'LESS_THAN';
+  }
+  return undefined;
+}
+
+/**
+ * Recover only unambiguous, explicitly written crypto fields when the
+ * structured model is unavailable.  This is intentionally narrower than the
+ * old free-form parser: it never invents a token or threshold and only
+ * accepts an allowlisted asset alias and an explicit quote unit.
+ */
+export function inferExplicitCryptoFields(query?: string): Pick<CryptoResearchTask, 'assetSymbol' | 'currency'> {
+  if (!query?.trim()) return {};
+
+  const assetSymbol = Object.entries(COIN_ALIASES).find(([alias]) => {
+    const escapedAlias = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`\\b${escapedAlias}\\b`, 'i').test(query);
+  })?.[1];
+
+  // A currency is considered explicit only when a symbol is attached to a
+  // numeric value or a supported ISO/name token is present in the query.
+  const symbolMatch = query.match(/(?:\$|€|£)\s*(?=\d)/);
+  const codeMatch = query.match(/\b(USD|EUR|GBP|CAD|JPY|AUD|KRW)\b/i);
+  const nameMatch = query.match(/\b(?:US dollars?|euros?|(?:British )?pounds?|Canadian dollars?|Japanese yen|Australian dollars?|South Korean won)\b/i);
+  const currency = symbolMatch?.[0]?.trim().charAt(0) || codeMatch?.[1] || nameMatch?.[0];
+
+  return {
+    ...(assetSymbol ? { assetSymbol } : {}),
+    ...(currency ? { currency: normalizeQuoteCurrency(currency) } : {}),
+  };
+}
 
 export interface ParsedCryptoQuery {
   assetSymbol: string;
+  currency: string;
   targetType: 'PRICE' | 'INDICATOR' | 'CANDLESTICK';
   indicator?: TechnicalIndicator;
   candlestickPattern?: CandlestickPattern;
@@ -72,180 +193,148 @@ export interface ParsedCryptoQuery {
 }
 
 export function parseCryptoQuery(task: CryptoResearchTask): ParsedCryptoQuery {
-  const rawQuery = task.query || '';
-  const query = rawQuery.toLowerCase();
   const warnings: string[] = [];
+  const explicitOperator = normalizeCryptoOperator(task.expectedOperator);
+  const targetValue = typeof task.targetValue === 'number' && Number.isFinite(task.targetValue)
+    ? task.targetValue
+    : undefined;
 
-  // 1. Resolve Symbol (Task explicit field takes strict precedence)
-  let symbol = (task.assetSymbol || '').trim().toUpperCase();
-  if (!symbol) {
-    for (const [alias, mapped] of Object.entries(COIN_ALIASES)) {
-      const regex = new RegExp(`\\b${alias}\\b`, 'i');
-      if (regex.test(query)) {
-        symbol = mapped;
-        break;
-      }
-    }
+  if (task.expectedOperator && !explicitOperator) {
+    throw new Error('Unsupported crypto operator: ' + task.expectedOperator);
+  }
+  if (task.targetValue !== undefined && targetValue === undefined) {
+    throw new Error('Crypto targetValue must be a finite number');
   }
 
-  // Check for explicit uppercase token in raw query, excluding stop-words and pure numbers
-  if (!symbol) {
-    const upperMatches = rawQuery.match(/\b([A-Z0-9]{2,8})\b/g);
-    if (upperMatches) {
-      for (const m of upperMatches) {
-        if (!CRYPTO_STOP_WORDS.has(m.toLowerCase()) && !/^\d+$/.test(m) && /[a-z]/i.test(m)) {
-          symbol = m;
-          break;
-        }
-      }
-    }
+  const operator = explicitOperator ?? 'GREATER_THAN';
+  const isObservationOnly = explicitOperator === undefined && targetValue === undefined;
+
+  // A price alert without an explicit quote unit is ambiguous. Observation
+  // requests may still use the provider's display currency, but an alerting
+  // task must never silently become USD just because the shared threshold
+  // schema has a historical default.
+  // When the asset is still unknown, defer this validation until the
+  // resolver has had a chance to prove that the query refers to a real
+  // cryptocurrency.  This lets vague requests terminate as NOT_FOUND rather
+  // than surfacing an unrelated currency error (and never authorizes a
+  // provider call because the asset gate below still runs first).
+  if (!isObservationOnly && task.assetSymbol?.trim() && !task.currency?.trim()) {
+    throw new Error('Crypto price alerts require an explicit quote currency');
   }
 
-  // Fallback: Extract first alphanumeric token that is NOT a stop-word and contains letters
-  if (!symbol) {
-    const tokens = query
-      .split(/[^a-z0-9]+/i)
-      .filter((t) => t.length >= 2 && !CRYPTO_STOP_WORDS.has(t) && !/^\d+$/.test(t) && /[a-z]/i.test(t));
-    if (tokens.length > 0) {
-      symbol = tokens[0].toUpperCase();
-    }
+  if (task.targetType === 'INDICATOR' && !task.indicator) {
+    throw new Error('Crypto indicator target requires an explicit indicator');
   }
-
-  // 2. Resolve Timeframe (Task explicit field takes precedence)
-  let timeframe = task.timeframe;
-  let inferredTimeframe: '1m' | '5m' | '15m' | '30m' | '1h' | '4h' | '1d' | '1w' | undefined;
-  if (/\b(4h|4 hour|4-hour)\b/.test(query)) inferredTimeframe = '4h';
-  else if (/\b(1h|1 hour|1-hour|hourly)\b/.test(query)) inferredTimeframe = '1h';
-  else if (/\b(1d|1 day|1-day|daily)\b/.test(query)) inferredTimeframe = '1d';
-  else if (/\b(15m|15 min|15-minute)\b/.test(query)) inferredTimeframe = '15m';
-  else if (/\b(5m|5 min|5-minute)\b/.test(query)) inferredTimeframe = '5m';
-
-  if (timeframe) {
-    if (inferredTimeframe && inferredTimeframe !== timeframe) {
-      warnings.push(`Query text implies timeframe "${inferredTimeframe}" but explicit timeframe "${timeframe}" takes precedence.`);
-    }
-  } else {
-    timeframe = inferredTimeframe || '1h';
+  if (task.targetType === 'CANDLESTICK' && !task.candlestickPattern) {
+    throw new Error('Crypto candlestick target requires an explicit pattern');
   }
-
-  // 3. Resolve Target Type & Indicators (Task explicit fields take precedence - Item 7)
-  let targetType = task.targetType;
-  let indicator = task.indicator;
-  let candlestickPattern = task.candlestickPattern;
-  let period = task.period;
-
-  if (task.targetType) {
-    targetType = task.targetType;
-    if (task.targetType === 'INDICATOR' && !indicator) {
-      if (/\brsi\b/.test(query)) {
-        indicator = 'RSI';
-        period = period || 14;
-      } else if (/\b(macd)\b/.test(query)) {
-        indicator = 'MACD';
-      } else if (/\b(sma)\b/.test(query)) {
-        indicator = 'SMA';
-      } else if (/\b(ema)\b/.test(query)) {
-        indicator = 'EMA';
-      } else if (/\b(vwap)\b/.test(query)) {
-        indicator = 'VWAP';
-      }
-    }
-  } else {
-    // Infer targetType from query text
-    if (/\brsi\b/.test(query) || indicator === 'RSI') {
-      targetType = 'INDICATOR';
-      indicator = 'RSI';
-      period = period || 14;
-    } else if (/\b(macd)\b/.test(query) || indicator === 'MACD') {
-      targetType = 'INDICATOR';
-      indicator = 'MACD';
-    } else if (/\b(sma|simple moving average)\b/.test(query) || indicator === 'SMA') {
-      targetType = 'INDICATOR';
-      indicator = 'SMA';
-      const periodMatch = query.match(/(\d+)\s*(?:day|period|ma|sma)/);
-      period = period || (periodMatch ? parseInt(periodMatch[1], 10) : 50);
-    } else if (/\b(ema|exponential moving average)\b/.test(query) || indicator === 'EMA') {
-      targetType = 'INDICATOR';
-      indicator = 'EMA';
-      const periodMatch = query.match(/(\d+)\s*(?:day|period|ma|ema)/);
-      period = period || (periodMatch ? parseInt(periodMatch[1], 10) : 50);
-    } else if (/\b(volume|vol)\b/.test(query) || indicator === 'VOLUME') {
-      targetType = 'INDICATOR';
-      indicator = 'VOLUME';
-    } else if (/\b(vwap)\b/.test(query) || indicator === 'VWAP') {
-      targetType = 'INDICATOR';
-      indicator = 'VWAP';
-    } else if (/\b(engulfing|bullish engulfing)\b/.test(query)) {
-      targetType = 'CANDLESTICK';
-      candlestickPattern = 'BULLISH_ENGULFING';
-    } else if (/\b(hammer|bullish hammer)\b/.test(query)) {
-      targetType = 'CANDLESTICK';
-      candlestickPattern = 'BULLISH_HAMMER';
-    } else if (/\b(morning star)\b/.test(query)) {
-      targetType = 'CANDLESTICK';
-      candlestickPattern = 'MORNING_STAR';
-    } else {
-      targetType = 'PRICE';
-    }
-  }
-
-  // 4. Resolve Operator (Item 7: Explicit expectedOperator takes strict precedence)
-  let inferredOperator: SentinelOperator | undefined;
-  if (/\b(drops below|falls below|less than|under|dips below)\b/.test(query)) {
-    inferredOperator = 'LESS_THAN';
-  } else if (/\b(closes above)\b/.test(query)) {
-    inferredOperator = 'CLOSES_ABOVE';
-  } else if (/\b(closes below)\b/.test(query)) {
-    inferredOperator = 'CLOSES_BELOW';
-  } else if (/\b(crosses above|breaks above|surpasses)\b/.test(query)) {
-    inferredOperator = 'CROSSES_ABOVE';
-  } else if (/\b(crosses below|breaks below)\b/.test(query)) {
-    inferredOperator = 'CROSSES_BELOW';
-  } else if (/\b(touches|hits|reaches)\b/.test(query)) {
-    inferredOperator = 'TOUCHES';
-  } else if (/\b(above|over|exceeds|greater than)\b/.test(query)) {
-    inferredOperator = 'GREATER_THAN';
-  }
-
-  let operator: SentinelOperator;
-  if (task.expectedOperator) {
-    operator = task.expectedOperator;
-    if (inferredOperator && inferredOperator !== task.expectedOperator) {
-      warnings.push(`Query text implies operator "${inferredOperator}" but explicit expectedOperator "${task.expectedOperator}" takes precedence.`);
-    }
-  } else {
-    operator = inferredOperator || 'GREATER_THAN';
-  }
-
-  // 5. Target Value (Explicit targetValue takes strict precedence)
-  let targetValue = task.targetValue;
-  if (targetValue === undefined) {
-    const numMatch = query.match(/(?:below|above|over|under|at|\$)\s*([\d,]+(?:\.\d+)?)/);
-    if (numMatch) {
-      targetValue = parseFloat(numMatch[1].replace(/,/g, ''));
-    } else if (indicator === 'RSI' && /\boversold\b/.test(query)) {
-      targetValue = 30;
-      if (!task.expectedOperator) operator = 'LESS_THAN';
-    } else if (indicator === 'RSI' && /\boverbought\b/.test(query)) {
-      targetValue = 70;
-      if (!task.expectedOperator) operator = 'GREATER_THAN';
-    }
-  }
-
-  const isObservationOnly = !task.expectedOperator && !inferredOperator && targetValue === undefined;
 
   return {
-    assetSymbol: symbol,
-    targetType: targetType || 'PRICE',
-    indicator,
-    candlestickPattern,
-    timeframe: timeframe || '1h',
-    period,
+    assetSymbol: normalizeCryptoAssetSymbol(task.assetSymbol),
+    currency: normalizeQuoteCurrency(task.currency),
+    targetType: task.targetType ?? 'PRICE',
+    indicator: task.indicator,
+    candlestickPattern: task.candlestickPattern,
+    timeframe: task.timeframe ?? '1h',
+    period: task.period,
     operator,
     targetValue,
     isObservationOnly,
     warnings,
   };
+}
+
+/** Semantically enriches a free-form crypto query before deterministic parsing. */
+export async function parseCryptoQueryWithAgent(
+  task: CryptoResearchTask,
+  options?: { signal?: AbortSignal; timeoutMs?: number }
+): Promise<ParsedCryptoQuery> {
+  const semantic = await extractSemanticQueryFields<CryptoSemanticFields>('CRYPTO', task.query, options);
+  if (!semantic) {
+    const explicitQueryFields = inferExplicitCryptoFields(task.query);
+    const hasStructuredFields =
+      Boolean(task.assetSymbol?.trim()) ||
+      Boolean(task.expectedOperator?.trim()) ||
+      task.targetValue !== undefined ||
+      Boolean(task.targetType) ||
+      Boolean(task.indicator) ||
+      Boolean(task.candlestickPattern);
+    const hasSafeQueryFields = Boolean(explicitQueryFields.assetSymbol || explicitQueryFields.currency);
+    if (!hasStructuredFields && !hasSafeQueryFields) {
+      throw new Error('Structured crypto intent extraction unavailable');
+    }
+    return parseCryptoQuery({
+      ...task,
+      assetSymbol: task.assetSymbol?.trim() || explicitQueryFields.assetSymbol,
+      currency: task.currency?.trim() || explicitQueryFields.currency,
+    });
+  }
+
+  const enriched: CryptoResearchTask = { ...task };
+  const explicitQueryFields = inferExplicitCryptoFields(task.query);
+  if (!enriched.assetSymbol && explicitQueryFields.assetSymbol) {
+    enriched.assetSymbol = explicitQueryFields.assetSymbol;
+  }
+  if (!enriched.currency && explicitQueryFields.currency) {
+    enriched.currency = explicitQueryFields.currency;
+  }
+  const validIndicators = new Set<TechnicalIndicator>([
+    'SMA', 'EMA', 'WMA', 'WEMA', 'RSI', 'MACD', 'BOLLINGER_BANDS', 'BOLLINGER',
+    'KELTNER_CHANNELS', 'STOCHASTIC', 'STOCHASTIC_RSI', 'CCI', 'ATR', 'ADX', 'ROC',
+    'AWESOME_OSCILLATOR', 'TRIX', 'WILLIAMS_R', 'VOLUME', 'OBV', 'MFI', 'VWAP',
+    'PSAR', 'ICHIMOKU_CLOUD', 'PRICE',
+  ]);
+  const validPatterns = new Set<CandlestickPattern>([
+    'BULLISH_ENGULFING', 'BULLISH_HAMMER', 'BULLISH_INVERTED_HAMMER', 'BULLISH_HARAMI',
+    'BULLISH_HARAMI_CROSS', 'BULLISH_MARUBOZU', 'MORNING_STAR', 'MORNING_DOJI_STAR',
+    'DRAGONFLY_DOJI', 'BEARISH_ENGULFING', 'BEARISH_HAMMER', 'BEARISH_INVERTED_HAMMER',
+    'BEARISH_HARAMI', 'BEARISH_HARAMI_CROSS', 'BEARISH_MARUBOZU', 'EVENING_STAR',
+    'EVENING_DOJI_STAR', 'GRAVESTONE_DOJI', 'DARK_CLOUD_COVER', 'SHOOTING_STAR', 'DOJI',
+  ]);
+  const validTimeframes = new Set<NonNullable<CryptoResearchTask['timeframe']>>([
+    '1m', '5m', '15m', '30m', '1h', '4h', '1d', '1w',
+  ]);
+  if (!enriched.assetSymbol && typeof semantic.assetSymbol === 'string' && semantic.assetSymbol.trim()) {
+    enriched.assetSymbol = normalizeCryptoAssetSymbol(semantic.assetSymbol);
+  }
+  if (!enriched.currency && typeof semantic.currency === 'string' && semantic.currency.trim()) {
+    const currency = normalizeQuoteCurrency(semantic.currency);
+    if (currency.length >= 3 && currency.length <= 8) enriched.currency = currency;
+  }
+  if (!enriched.targetType && (semantic.targetType === 'PRICE' || semantic.targetType === 'INDICATOR' || semantic.targetType === 'CANDLESTICK')) {
+    enriched.targetType = semantic.targetType;
+  }
+  if (!enriched.indicator && typeof semantic.indicator === 'string' && validIndicators.has(semantic.indicator as TechnicalIndicator)) {
+    enriched.indicator = semantic.indicator as TechnicalIndicator;
+  }
+  if (!enriched.candlestickPattern && typeof semantic.candlestickPattern === 'string' && validPatterns.has(semantic.candlestickPattern as CandlestickPattern)) {
+    enriched.candlestickPattern = semantic.candlestickPattern as CandlestickPattern;
+  }
+  if (!enriched.timeframe && typeof semantic.timeframe === 'string' && validTimeframes.has(semantic.timeframe as NonNullable<CryptoResearchTask['timeframe']>)) {
+    enriched.timeframe = semantic.timeframe as NonNullable<CryptoResearchTask['timeframe']>;
+  }
+  if (!enriched.expectedOperator) {
+    // The model's structured operator is useful for explicit crossing and
+    // indicator language, but ordinary threshold wording has a deterministic
+    // meaning. Prefer that narrow lexical signal when present.
+    const queryOperator = inferCryptoQueryOperator(task.query);
+    const semanticOperator = typeof semantic.expectedOperator === 'string' && semantic.expectedOperator.trim()
+      ? normalizeCryptoOperator(semantic.expectedOperator)
+      : undefined;
+    const operator = queryOperator ?? semanticOperator;
+    if (!operator && typeof semantic.expectedOperator === 'string' && semantic.expectedOperator.trim()) {
+      throw new Error('Structured crypto intent returned an unsupported operator: ' + semantic.expectedOperator);
+    }
+    if (operator) enriched.expectedOperator = operator;
+  }
+  if (enriched.period === undefined && Number.isInteger(semantic.period) && Number(semantic.period) > 0 && Number(semantic.period) <= 1000) {
+    enriched.period = Number(semantic.period);
+  }
+  if (enriched.targetValue === undefined && typeof semantic.targetValue === 'number' && Number.isFinite(semantic.targetValue)) {
+    enriched.targetValue = semantic.targetValue;
+  }
+
+  return parseCryptoQuery(enriched);
 }
 
 /**
@@ -341,7 +430,10 @@ export async function* runCryptoPipeline(
 
   if (signal?.aborted) throw new Error('Research cancelled by user');
 
-  const parsed = parseCryptoQuery(task);
+  const parsed = await parseCryptoQueryWithAgent(task, {
+    signal,
+    timeoutMs: Math.min(5000, Math.max(1000, deadline - Date.now())),
+  });
 
   // Emit any parameter precedence warnings (Item 7)
   if (parsed.warnings && parsed.warnings.length > 0) {
@@ -361,7 +453,7 @@ export async function* runCryptoPipeline(
       taskId,
       executionId,
       step: 'RESOLVING_ENTITY',
-      message: `Heuristic entity extraction inconclusive. Attempting semantic entity resolution...`,
+      message: `Structured extraction did not include an asset. Attempting a second Strands entity-resolution pass...`,
       timestamp: Date.now(),
     };
 
@@ -393,6 +485,28 @@ export async function* runCryptoPipeline(
       query: task.query,
       reason: 'No recognizable cryptocurrency asset symbol or token name was provided.',
       suggestion: 'Please specify a token ticker (e.g. BTC, ETH, SOL, PEPE) or contract address.',
+    };
+  }
+
+  // A resolved alert must still carry an explicit quote currency.  Do this
+  // after entity resolution so an underspecified query can return NOT_FOUND
+  // without inventing USD, while a descriptive query that resolves to an
+  // asset fails closed with an actionable error.
+  const explicitCurrency = task.currency?.trim() || inferExplicitCryptoFields(task.query).currency;
+  if (!parsed.isObservationOnly && !explicitCurrency) {
+    const reason = 'Crypto price alerts require an explicit quote currency (for example USD, EUR, or GBP).';
+    yield {
+      taskId,
+      executionId,
+      step: 'DISCOVERY_ERROR',
+      message: reason,
+      timestamp: Date.now(),
+    };
+    return {
+      status: 'ERROR',
+      taskId,
+      query: task.query,
+      error: reason,
     };
   }
 
@@ -434,7 +548,7 @@ export async function* runCryptoPipeline(
   let coinbaseProviderError: string | null = null;
 
   try {
-    cbProduct = await coinbase.resolveProduct(parsed.assetSymbol, getClientOptions());
+    cbProduct = await coinbase.resolveProduct(parsed.assetSymbol, getClientOptions(), parsed.currency);
     liveQuote = cbProduct ? await coinbase.getSpotPrice(cbProduct.id, getClientOptions()) : null;
   } catch (err: unknown) {
     if ((err as Error)?.name === 'AbortError' || signal?.aborted) {
@@ -456,6 +570,16 @@ export async function* runCryptoPipeline(
   }
 
   if (signal?.aborted) throw new Error('Research cancelled by user');
+
+  if (!liveQuote && parsed.currency !== 'USD') {
+    return {
+      status: 'ERROR',
+      taskId,
+      query: task.query,
+      error: `No live ${parsed.currency} quote is available for ${parsed.assetSymbol}. The provider fallback currently exposes USD DEX prices only, so the requested currency was not substituted.`,
+      provider: 'COINBASE',
+    };
+  }
 
   // 2. If not on Coinbase, search on-chain DEX pairs via DexScreener
   if (!liveQuote) {
@@ -923,7 +1047,7 @@ export async function* runCryptoPipeline(
   // 5. Synthesize Deterministic Contract with Operator & Condition Evaluation (Item 11)
   const contract: CryptoThreshold = {
     assetSymbol: parsed.assetSymbol,
-    currency: 'USD',
+    currency: parsed.currency,
     venue,
     dexContractAddress: dexPair?.baseToken?.address || task.dexContractAddress,
     dexNetwork: dexPair?.chainId || task.dexNetwork,

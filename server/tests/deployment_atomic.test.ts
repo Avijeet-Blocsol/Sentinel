@@ -49,7 +49,7 @@ function makeSub(ruleId: string): SubSentinel {
     sentinel_type: 'CRYPTO',
     target_source: 'BTC',
     operator: 'GREATER_THAN',
-    threshold: JSON.stringify({ assetSymbol: 'BTC', targetType: 'PRICE', targetValue: 1, operator: 'GREATER_THAN' }),
+    threshold: JSON.stringify({ assetSymbol: 'BTC', currency: 'USD', targetType: 'PRICE', targetValue: 1, operator: 'GREATER_THAN' }),
     ttl_seconds: 60,
     health_status: 'HEALTHY',
     error_count: 0,
@@ -232,7 +232,91 @@ async function run() {
   assert.equal((await conversationRepository.getById(rejectedConversation.id))?.phase, 'DISCOVERY');
   assert.equal((await interruptActionRepository.getById(rejectedInterrupt.id))?.status, 'REJECTED');
 
-  console.log('PASS atomic proposal/deployment commit, duplicate no-op, expiry rollback, and rejection lifecycle');
+  // The new setup gate has no interrupt row: the selected lifecycle mode is
+  // itself the confirmation and atomically activates the paused proposal.
+  const modeConversation = { ...makeConversation(user.id), phase: 'AWAITING_TRIGGER_MODE' as const };
+  const modeRule = makeRule(user.id, modeConversation.id);
+  const modeSub = makeSub(modeRule.id);
+  await conversationRepository.create(modeConversation);
+  assert.equal(await deploymentRepository.stageMonitoringMode({
+    conversationId: modeConversation.id,
+    rule: modeRule,
+    subSentinels: [modeSub],
+    baselineEvents: [{
+      id: randomUUID(),
+      sub_sentinel_id: modeSub.id,
+      source: modeSub.target_source,
+      event_hash: 'mode-baseline',
+    }],
+    now: Date.now(),
+  }), true);
+  assert.equal((await ruleRepository.getById(modeRule.id))?.status, 'PAUSED');
+  assert.equal((await conversationRepository.getById(modeConversation.id))?.phase, 'AWAITING_TRIGGER_MODE');
+  assert.equal((await interruptActionRepository.getPendingByUserId(user.id)).some((action) => action.rule_id === modeRule.id), false);
+  assert.equal(await deploymentRepository.deployMonitoringMode({
+    conversationId: modeConversation.id,
+    userId: user.id,
+    ruleId: modeRule.id,
+    triggerMode: 'ONE_SHOT',
+    now: Date.now(),
+  }), true);
+  assert.equal((await ruleRepository.getById(modeRule.id))?.status, 'ACTIVE');
+  assert.equal((await ruleRepository.getById(modeRule.id))?.trigger_mode, 'ONE_SHOT');
+  assert.equal((await conversationRepository.getById(modeConversation.id))?.phase, 'DEPLOYED');
+
+  // Clarification interrupts are allowed before a rule exists and move the
+  // conversation into a durable blockade until one of the persisted choices
+  // is selected.
+  const clarificationConversation: AgentConversation = {
+    ...makeConversation(user.id),
+    phase: 'SCOUTING',
+  };
+  await conversationRepository.create(clarificationConversation);
+  const clarificationInterrupt: InterruptAction = {
+    id: randomUUID(),
+    alert_id: null,
+    rule_id: null,
+    conversation_id: clarificationConversation.id,
+    user_id: user.id,
+    action_type: 'CLARIFICATION_REQUIRED',
+    action_payload: JSON.stringify({
+      kind: 'CLARIFICATION_REQUIRED',
+      question: 'Which source should Sentinel monitor?',
+      choices: [
+        { id: 'official', label: 'Official source' },
+        { id: 'community', label: 'Community sources' },
+      ],
+      field: 'source_preference',
+      resume_phase: 'SCOUTING',
+    }),
+    status: 'PENDING',
+    expires_at: Date.now() + 60_000,
+    created_at: Date.now(),
+    resolved_at: null,
+  };
+  assert.equal(await interruptActionRepository.createClarification({
+    action: clarificationInterrupt,
+    conversationId: clarificationConversation.id,
+    userId: user.id,
+    expectedPhase: 'SCOUTING',
+    now: Date.now(),
+  }), true);
+  assert.equal((await conversationRepository.getById(clarificationConversation.id))?.phase, 'CLARIFICATION_PENDING');
+  const pendingClarification = await interruptActionRepository.getById(clarificationInterrupt.id);
+  assert.equal(pendingClarification?.conversation_id, clarificationConversation.id);
+  assert.equal(pendingClarification?.rule_id, null);
+  assert.equal(await interruptActionRepository.resolveClarification({
+    interruptId: clarificationInterrupt.id,
+    conversationId: clarificationConversation.id,
+    userId: user.id,
+    resolution: 'APPROVED',
+    resumePhase: 'SCOUTING',
+    now: Date.now(),
+  }), true);
+  assert.equal((await interruptActionRepository.getById(clarificationInterrupt.id))?.status, 'APPROVED');
+  assert.equal((await conversationRepository.getById(clarificationConversation.id))?.phase, 'SCOUTING');
+
+  console.log('PASS atomic proposal/deployment commit, clarification lifecycle, duplicate no-op, expiry rollback, and rejection lifecycle');
 }
 
 run().catch((error) => {

@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "type": "string",
+      "enum": [
+        "CLARIFICATION_REQUIRED",
+        "QUERY_CONFIRMATION_REQUIRED",
+        "MONITORING_MODE_REQUIRED",
+        "TASK_EDIT_CONFIRMATION_REQUIRED"
+      ]
+    },
+    "question": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4000
+    },
+    "choices": {
+      "minItems": 2,
+      "maxItems": 9,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "input": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "const": "TEXT"
+              },
+              "placeholder": {
+                "type": "string",
+                "maxLength": 300
+              },
+              "submit_label": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
+              },
+              "max_length": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4000
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "id",
+          "label"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "field": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    "resume_phase": {
+      "type": "string",
+      "enum": [
+        "DISCOVERY",
+        "AWAITING_QUERY_CONFIRMATION",
+        "SCOUTING",
+        "AWAITING_TRIGGER_MODE",
+        "CLARIFICATION_PENDING",
+        "INTERRUPT_PENDING",
+        "DEPLOYED"
+      ]
+    },
+    "retry_message": {
+      "type": "string",
+      "maxLength": 8000
+    },
+    "task_edit": {
+      "type": "object",
+      "properties": {
+        "operation": {
+          "type": "string",
+          "enum": [
+            "DELETE_CONDITION",
+            "UPDATE_CONDITION",
+            "CHANGE_TRIGGER_MODE"
+          ]
+        },
+        "target_sub_sentinel_id": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "target_label": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "expected_rule_updated_at": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "changes": {
+          "default": {},
+          "type": "object",
+          "properties": {
+            "schedule_seconds": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 31536000
+            },
+            "operator": {
+              "type": "string",
+              "enum": [
+                "GREATER_THAN",
+                "LESS_THAN",
+                "CROSSES_ABOVE",
+                "CROSSES_BELOW",
+                "TOUCHES",
+                "CLOSES_ABOVE",
+                "CLOSES_BELOW",
+                "EQUALS",
+                "KEYWORD_MATCH",
+                "STATE_FLIP",
+                "HASH_DELTA",
+                "SEMANTIC_MATCH",
+                "PERCENT_CHANGE"
+              ]
+            },
+            "threshold_patch": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
+            },
+            "trigger_mode": {
+              "type": "string",
+              "enum": [
+                "ONE_SHOT",
+                "PERSISTENT"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "operation",
+        "summary",
+        "changes"
+      ],
+      "additionalProperties": false
+    },
+    "task_edit_request": {
+      "type": "string",
+      "maxLength": 16000
+    }
+  },
+  "required": [
+    "kind",
+    "question",
+    "choices",
+    "resume_phase"
+  ],
+  "additionalProperties": false
+}

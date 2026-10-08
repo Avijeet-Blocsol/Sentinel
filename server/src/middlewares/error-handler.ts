@@ -6,10 +6,24 @@
 import { FastifyError, FastifyReply, FastifyRequest } from 'fastify';
 import { ZodError } from 'zod';
 
+export function redactRequestUrl(rawUrl: string): string {
+  try {
+    const parsed = new URL(rawUrl, 'http://sentinel.invalid');
+    for (const key of ['ticket', 'token', 'access_token', 'authorization']) {
+      if (parsed.searchParams.has(key)) parsed.searchParams.set(key, '[REDACTED]');
+    }
+    return `${parsed.pathname}${parsed.search}`;
+  } catch {
+    // Keep diagnostics useful without preserving a malformed credential-bearing
+    // query string in logs.
+    return rawUrl.split('?')[0] || '/';
+  }
+}
+
 export function errorHandler(error: FastifyError | Error, req: FastifyRequest, reply: FastifyReply) {
   req.log.error({
     err: error,
-    url: req.raw.url,
+    url: redactRequestUrl(req.raw.url || '/'),
     method: req.raw.method,
     userId: req.user?.id,
   }, 'Unhandled request error');

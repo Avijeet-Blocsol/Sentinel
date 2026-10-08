@@ -12,7 +12,7 @@ import { Search, X } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { Screen, useSafeAreaInsets, Text } from '@/components/ui';
 import { useSentinel } from '@/hooks/use_sentinel';
-import { HttpError } from '@/api/http_adapter';
+import { isCancellation } from '@/api/http_adapter';
 import type { AgentConversation } from '@sentinel/shared';
 
 export interface SentinelTaskItem {
@@ -65,7 +65,7 @@ export function SearchSentinelTasksScreen({ onBack, onSelectTask }: SearchSentin
           );
         }
       } catch (err) {
-        if (!(err instanceof HttpError && err.statusCode === 499) && !disposed) {
+        if (!isCancellation(err) && !disposed) {
           console.warn('[SearchSentinelTasks] Search failed:', err);
           setErrorMessage(err instanceof Error ? err.message : 'Search could not be completed');
         }

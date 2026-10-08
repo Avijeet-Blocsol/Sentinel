@@ -20,7 +20,7 @@ import type {
 
 export interface ExecutionLeaseRecord {
   id: string;
-  event_type: 'TICK' | 'EVALUATE_RULE';
+  event_type: 'TICK' | 'EVALUATE_RULE' | 'WORKFLOW_RESUME';
   rule_id?: string | null;
   status: 'RUNNING' | 'SUCCEEDED' | 'FAILED';
   lease_owner: string;
@@ -138,12 +138,44 @@ export interface IAlertEventRepository {
 
 export interface IInterruptActionRepository {
   create(action: InterruptAction): Promise<void> | void;
+  createClarification(input: {
+    action: InterruptAction;
+    conversationId: string;
+    userId: string;
+    expectedPhase: AgentConversation['phase'];
+    now: number;
+  }): Promise<boolean> | boolean;
   getPendingByUserId(userId: string): Promise<EnrichedInterruptAction[]> | EnrichedInterruptAction[];
+  getLatestByConversationId(
+    conversationId: string,
+    actionType: string,
+    status: InterruptAction['status'],
+  ): Promise<EnrichedInterruptAction | null> | (EnrichedInterruptAction | null);
   getPending(): Promise<InterruptAction[]> | InterruptAction[];
   expirePending(now?: number): Promise<InterruptAction[]> | InterruptAction[];
   getById(id: string): Promise<EnrichedInterruptAction | null> | (EnrichedInterruptAction | null);
+  updateActionPayload(id: string, actionPayload: string): Promise<boolean> | boolean;
   updateStatus(id: string, status: InterruptAction['status']): Promise<void> | void;
   resolveIfPending(id: string, status: InterruptAction['status'], now?: number): Promise<boolean> | boolean;
+  resolveClarification(input: {
+    interruptId: string;
+    conversationId: string;
+    userId: string;
+    resolution: 'APPROVED' | 'REJECTED';
+    resumePhase: AgentConversation['phase'];
+    now: number;
+  }): Promise<boolean> | boolean;
+  /**
+   * Repairs a pending choice gate left behind by an interrupted/older
+   * workflow. This is intentionally conditional on the action identity and
+   * ownership so a stale card cannot move another conversation forward.
+   */
+  restorePendingClarification(input: {
+    interruptId: string;
+    conversationId: string;
+    userId: string;
+    now: number;
+  }): Promise<boolean> | boolean;
 }
 
 export interface DeploymentCommitInput {
@@ -167,13 +199,43 @@ export interface DeploymentProposalInput {
   now: number;
 }
 
+export interface MonitoringModeProposalInput {
+  conversationId: string;
+  rule: Rule;
+  subSentinels: SubSentinel[];
+  baselineEvents: Array<Pick<SeenEvent, 'id' | 'sub_sentinel_id' | 'source' | 'event_hash'>>;
+  now: number;
+}
+
+export interface MonitoringModeDeploymentInput {
+  conversationId: string;
+  userId: string;
+  ruleId: string;
+  triggerMode: Rule['trigger_mode'];
+  now: number;
+}
+
+export interface TaskEditCommitInput {
+  interruptId: string;
+  conversationId: string;
+  userId: string;
+  expectedRuleUpdatedAt: number;
+  rule: Rule;
+  subSentinels: SubSentinel[];
+  deletedSubSentinelIds: string[];
+  now: number;
+}
+
 /**
  * Commits each deployment lifecycle boundary as one durable operation.
  * SQLite implements this with a transaction and DynamoDB with TransactWrite.
  */
 export interface IDeploymentRepository {
   stage(input: DeploymentProposalInput): Promise<boolean> | boolean;
+  stageMonitoringMode(input: MonitoringModeProposalInput): Promise<boolean> | boolean;
   approve(input: DeploymentCommitInput): Promise<boolean> | boolean;
+  deployMonitoringMode(input: MonitoringModeDeploymentInput): Promise<boolean> | boolean;
+  applyTaskEdit(input: TaskEditCommitInput): Promise<boolean> | boolean;
   reject(input: Pick<DeploymentCommitInput, 'interruptId' | 'conversationId' | 'rule' | 'now'>): Promise<boolean> | boolean;
 }
 

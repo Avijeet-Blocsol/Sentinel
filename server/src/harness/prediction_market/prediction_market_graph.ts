@@ -16,6 +16,10 @@ import type {
   PredictionMarketHarnessConfig,
   PredictionMarketPipelineOptions,
 } from './types.js';
+import {
+  extractSemanticQueryFields,
+  type PredictionMarketSemanticFields,
+} from '../../agent/structured_query_agent.js';
 
 interface ParsedPredictionMarketQuery {
   searchPhrase: string;
@@ -154,6 +158,47 @@ function parsePredictionMarketQuery(task: PredictionMarketTask): ParsedPredictio
   };
 }
 
+/** Uses Strands for semantic market-query interpretation, then keeps the
+ * existing range and enum validation as the authority. */
+async function parsePredictionMarketQueryWithAgent(
+  task: PredictionMarketTask,
+  options?: { signal?: AbortSignal; timeoutMs?: number }
+): Promise<ParsedPredictionMarketQuery> {
+  const parsed = parsePredictionMarketQuery(task);
+  const semantic = await extractSemanticQueryFields<PredictionMarketSemanticFields>(
+    'PREDICTION_MARKET',
+    task.query,
+    options
+  );
+  if (!semantic) return parsed;
+
+  const validOperators = new Set<SentinelOperator>([
+    'GREATER_THAN', 'LESS_THAN', 'CROSSES_ABOVE', 'CROSSES_BELOW', 'EQUALS',
+  ]);
+  const result = { ...parsed };
+
+  if (!task.conditionId && typeof semantic.searchPhrase === 'string' && semantic.searchPhrase.trim()) {
+    result.searchPhrase = semantic.searchPhrase.trim();
+  }
+  if (!task.desiredOutcome && (semantic.desiredOutcome === 'YES' || semantic.desiredOutcome === 'NO')) {
+    result.desiredOutcome = semantic.desiredOutcome;
+  }
+  if (
+    task.targetProbability === undefined &&
+    typeof semantic.targetProbability === 'number' &&
+    Number.isFinite(semantic.targetProbability) &&
+    semantic.targetProbability >= 0 &&
+    semantic.targetProbability <= 1
+  ) {
+    result.targetProbability = semantic.targetProbability;
+  }
+  if (!task.expectedOperator && typeof semantic.expectedOperator === 'string' && validOperators.has(semantic.expectedOperator as SentinelOperator)) {
+    result.operator = semantic.expectedOperator as SentinelOperator;
+  }
+
+  return result;
+}
+
 export async function* runPredictionMarketPipeline(
   task: PredictionMarketTask,
   optionsOrConfig: PredictionMarketHarnessConfig | PredictionMarketPipelineOptions = {},
@@ -202,7 +247,10 @@ export async function* runPredictionMarketPipeline(
 
   if (effectiveSignal?.aborted) throw new Error('Research cancelled by user');
 
-  const parsed = parsePredictionMarketQuery(task);
+  const parsed = await parsePredictionMarketQueryWithAgent(task, {
+    signal: effectiveSignal,
+    timeoutMs: Math.min(5000, Math.max(1000, deadline - Date.now())),
+  });
 
   yield {
     taskId,
@@ -578,4 +626,3 @@ export async function* runPredictionMarketPipeline(
 
   return outcome;
 }
-

@@ -149,7 +149,14 @@ async function runTests() {
   const cryptoHarness = new CryptoResearchHarness({ timeoutMs: 12000 });
   const cryptoTask: CryptoResearchTask = {
     id: `task-crypto-${Date.now()}`,
-    query: 'Alert me if Bitcoin drops below $55,000 or RSI on 1h is oversold',
+    // Use a condition that is stable across live market prices.  The old
+    // below-$55,000 assertion was guaranteed to fail while BTC traded above
+    // that level, which made a healthy provider look like a harness defect.
+    query: 'Alert me if Bitcoin is above $1',
+    assetSymbol: 'BTC',
+    currency: 'USD',
+    expectedOperator: 'GREATER_THAN',
+    targetValue: 1,
   };
 
   const cryptoEvents: string[] = [];

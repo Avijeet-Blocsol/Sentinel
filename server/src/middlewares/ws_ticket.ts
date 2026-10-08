@@ -5,10 +5,12 @@ const MAX_TTL_SECONDS = 300;
 const consumedTicketIds = new Map<string, number>();
 
 function getTicketSecret(): string {
-  const secret = process.env.WS_TICKET_SECRET || process.env.ENGINE_API_SECRET || process.env.SENTINEL_SERVICE_SECRET ||
-    (process.env.NODE_ENV === 'production' ? '' : 'local-development-ws-ticket-secret');
+  // WebSocket tickets are user-session credentials. Never sign them with the
+  // engine secret: a leaked ticket must not imply access to scheduler routes,
+  // and rotating one trust domain must not silently rotate the other.
+  const secret = process.env.WS_TICKET_SECRET;
   if (!secret) {
-    throw new Error('WS_TICKET_SECRET or an engine service secret is required');
+    throw new Error('WS_TICKET_SECRET is required');
   }
   return secret;
 }

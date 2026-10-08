@@ -1,7 +1,8 @@
 /**
  * Strands Sentinel - S3 Session Storage Adapter
  * Provides storage backend for Strands SDK SessionManager.
- * Uses Amazon S3 for cloud environments, with seamless LocalFileStorage fallback for local development.
+ * Uses Amazon S3 for AWS infrastructure and LocalFileStorage only when local
+ * infrastructure mode is explicitly selected.
  */
 
 import { S3Storage, LocalFileStorage, type Storage } from '@strands-agents/sdk/storage';
@@ -23,8 +24,8 @@ export function getSessionStorage(config?: SessionStorageConfig): Storage {
   const prefix = config?.prefix || process.env.AWS_S3_SESSION_PREFIX || 'sentinel/sessions/';
   const region = config?.region || process.env.AWS_REGION || 'us-east-1';
 
-  if (awsInfrastructure && process.env.NODE_ENV === 'production' && !bucket) {
-    throw new Error('Production requires AWS_S3_SESSION_BUCKET; refusing local session storage fallback');
+  if (awsInfrastructure && !bucket) {
+    throw new Error('AWS infrastructure requires AWS_S3_SESSION_BUCKET; refusing local session storage');
   }
 
   if (bucket) {
@@ -45,7 +46,7 @@ export function getSessionStorage(config?: SessionStorageConfig): Storage {
     return new S3Storage(bucket, { prefix, s3Client: client });
   }
 
-  // Graceful fallback for local offline development without AWS bucket
+  // LocalFileStorage is available only for explicitly selected local mode.
   const localDir = process.env.STRANDS_LOCAL_STORAGE_DIR || path.resolve(process.cwd(), '.strands');
   return new LocalFileStorage(localDir);
 }

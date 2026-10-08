@@ -6,7 +6,6 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
-    "demo": "tsx src/index.ts",
     "worker": "node dist/execution/worker_main.js",
     "scheduler:ensure": "node dist/execution/scheduler_main.js",
     "backfill:due-schedule": "node dist/execution/backfill_due_schedule.js",

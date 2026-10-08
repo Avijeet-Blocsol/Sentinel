@@ -12,15 +12,34 @@ export type Environment = Record<string, string | undefined>;
 export function getProductionConfigurationIssues(env: Environment = process.env): string[] {
   if (env.NODE_ENV !== 'production') return [];
 
+  const issues: string[] = [];
+  if (!env.CLERK_SECRET_KEY) {
+    issues.push('CLERK_SECRET_KEY is required');
+  }
+  if (!env.CLERK_PUBLISHABLE_KEY) {
+    issues.push('CLERK_PUBLISHABLE_KEY is required');
+  }
+  const serviceSecret = env.ENGINE_API_SECRET || env.SENTINEL_SERVICE_SECRET;
+  if (!serviceSecret) {
+    issues.push('ENGINE_API_SECRET or SENTINEL_SERVICE_SECRET is required');
+  }
+  if (!env.WS_TICKET_SECRET) {
+    issues.push('WS_TICKET_SECRET is required');
+  }
+
   let infrastructureMode: 'local' | 'aws';
   try {
     infrastructureMode = getInfrastructureMode(env);
   } catch (error) {
-    return [error instanceof Error ? error.message : String(error)];
+    return [...issues, error instanceof Error ? error.message : String(error)];
   }
-  if (infrastructureMode === 'local') return [];
-
-  const issues: string[] = [];
+  if (infrastructureMode === 'local') {
+    issues.push('Production requires SENTINEL_INFRASTRUCTURE_MODE=aws; local infrastructure is development-only');
+    return issues;
+  }
+  if (env.RUN_EMBEDDED_EVALUATOR === 'true') {
+    issues.push('Production must not run the embedded evaluator; use EventBridge Scheduler and the SQS worker');
+  }
   if ((env.DATABASE_PROVIDER || 'sqlite').toLowerCase() !== 'dynamodb') {
     issues.push('DATABASE_PROVIDER must be dynamodb');
   }

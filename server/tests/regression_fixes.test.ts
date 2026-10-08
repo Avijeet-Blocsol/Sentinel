@@ -3,6 +3,7 @@ import { consumeWsTicket, issueWsTicket, verifyWsTicket } from '../src/middlewar
 import { parseConditionTree, WsChatMessageSchema } from '@sentinel/shared';
 
 function run() {
+  process.env.WS_TICKET_SECRET = 'regression-test-secret';
   const issued = issueWsTicket('regression-user');
   const verified = verifyWsTicket(issued.ticket);
   assert.equal(verified?.userId, 'regression-user');

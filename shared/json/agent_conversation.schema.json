@@ -31,6 +31,8 @@
         "DISCOVERY",
         "AWAITING_QUERY_CONFIRMATION",
         "SCOUTING",
+        "AWAITING_TRIGGER_MODE",
+        "CLARIFICATION_PENDING",
         "INTERRUPT_PENDING",
         "DEPLOYED"
       ]

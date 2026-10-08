@@ -188,9 +188,10 @@ async function runCryptoTests() {
   console.log(`  [PASS] DexScreener search verified ${pairs.length} pairs against symbol PEPE`);
 
   // ---------------------------------------------------------
-  // Point 7: Explicit structured parameters take precedence over query text
+  // Point 7: Explicit structured parameters are authoritative; prose is not
+  // parsed again by a local fallback.
   // ---------------------------------------------------------
-  console.log('\n--- 7. Testing Parameter Precedence and Conflict Warning ---');
+  console.log('\n--- 7. Testing Structured Parameter Authority ---');
   const precedenceTask: CryptoResearchTask = {
     id: `prec-${Date.now()}`,
     query: 'Alert me if Bitcoin drops under 50000', // text implies LESS_THAN
@@ -209,8 +210,8 @@ async function runCryptoTests() {
   }
 
   const precedenceOutcome = nextPrec.value;
-  assert.ok(precedenceEvents.length > 0, 'No precedence warning emitted in telemetry');
-  console.log('  [PASS] Parameter conflict telemetry emitted:', precedenceEvents[0]);
+  assert.equal(precedenceEvents.length, 0, 'Free-form query text must not produce a local precedence warning');
+  console.log('  [PASS] Free-form query text was not re-parsed by a fallback');
   if (precedenceOutcome.status === 'EXACT_MATCH') {
     assert.strictEqual(precedenceOutcome.contract.operator, 'GREATER_THAN', `Operator was overwritten to ${precedenceOutcome.contract.operator}`);
     console.log('  [PASS] Explicit operator GREATER_THAN preserved over "under" query text');

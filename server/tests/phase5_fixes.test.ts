@@ -149,7 +149,18 @@ async function runPhase5Tests() {
     }),
   } as unknown as AgenticConditionEvaluator;
 
-  const webObserver = new WebObserverEvaluator({ agenticEvaluator: errorMockAgent });
+  const webObserver = new WebObserverEvaluator({
+    agenticEvaluator: errorMockAgent,
+    fetchFn: async (url: string) => ({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      headers: new Headers({ 'content-type': 'text/html' }),
+      finalUrl: url,
+      text: async () => '<html><body><h1>Current price: $123</h1></body></html>',
+      json: async () => ({}),
+    }),
+  });
   const dummyWebSentinel: SubSentinel = {
     id: randomUUID(),
     rule_id: testRule.id,

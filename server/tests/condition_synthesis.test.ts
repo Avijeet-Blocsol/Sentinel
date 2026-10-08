@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { evaluateConditionTree, parseConditionTree } from '@sentinel/shared';
 import { extractSynthesizedRule } from '../src/services/deployment_workflow.js';
+import { buildVerifiedContractSynthesis } from '../src/api/realtime/ws_stream_handler.js';
 
 const userId = 'condition-synthesis-user';
 const conversationId = '00000000-0000-4000-8000-000000000777';
@@ -67,6 +68,86 @@ ${JSON.stringify({
 })}
 \`\`\``, userId, conversationId);
   assert.equal(ambiguousFlatRule.rule, undefined, 'multi-watcher proposals must not silently default to SINGLE');
+
+  const incompleteWatcher = extractSynthesizedRule(`\`\`\`json
+${JSON.stringify({
+  title: 'Incomplete watcher deployment',
+  natural_language_intent: 'Alert',
+  combinator: 'SINGLE',
+  sub_sentinels: [{ condition_key: 'A' }],
+})}
+\`\`\``, userId, conversationId);
+  assert.equal(incompleteWatcher.rule, undefined, 'incomplete watcher fields must fail closed instead of defaulting to MARKET/GREATER_THAN');
+
+  const singleLeafCombinator = extractSynthesizedRule(`\`\`\`json
+${JSON.stringify({
+  title: 'Single leaf deployment',
+  natural_language_intent: 'Alert if BTC is above 75000',
+  combinator: 'LEAF',
+  trigger_mode: 'PERSISTENT',
+  audio_tone: 'chime',
+  sub_sentinels: [watcher('A', 'BTC')],
+  condition_tree: { type: 'LEAF', subSentinelId: 'A' },
+})}
+\`\`\``, userId, conversationId);
+  assert.equal(singleLeafCombinator.rule?.combinator, 'SINGLE', 'a single LEAF tree must normalize to SINGLE');
+
+  const verifiedContract = buildVerifiedContractSynthesis({
+    toolName: 'crypto_research',
+    contract: {
+      assetSymbol: 'BTC',
+      currency: 'USD',
+      venue: 'COINBASE',
+      targetType: 'PRICE',
+      targetValue: 75000,
+      operator: 'GREATER_THAN',
+    },
+  }, userId, conversationId, 'Notify me when Bitcoin exceeds 75,000 USD');
+  assert.ok(verifiedContract.rule, 'a validated crypto contract must produce a lifecycle proposal');
+  assert.equal(verifiedContract.subSentinels?.[0]?.target_source, 'BTC');
+  assert.equal(verifiedContract.subSentinels?.[0]?.operator, 'GREATER_THAN');
+
+  const verifiedAfterChoice = buildVerifiedContractSynthesis({
+    toolName: 'crypto_research',
+    contract: {
+      assetSymbol: 'BTC',
+      currency: 'USD',
+      venue: 'COINBASE',
+      targetType: 'PRICE',
+      targetValue: 75000,
+      operator: 'GREATER_THAN',
+      query: 'Launch live reconnaissance',
+    },
+  }, userId, conversationId, 'Launch live reconnaissance');
+  assert.equal(
+    verifiedAfterChoice.rule?.natural_language_intent,
+    'BTC greater than 75000 USD',
+    'workflow choice labels must never become the persisted task intent',
+  );
+
+  const unverifiedWebTarget = extractSynthesizedRule(`\`\`\`json
+${JSON.stringify({
+  title: 'Web observer target binding',
+  natural_language_intent: 'Alert when the verified page changes',
+  category: 'WEB_INTEL',
+  combinator: 'SINGLE',
+  trigger_mode: 'PERSISTENT',
+  audio_tone: 'chime',
+  sub_sentinels: [{
+    condition_key: 'A',
+    sentinel_type: 'WEB_OBSERVER',
+    target_source: 'https://verified.example/page',
+    operator: 'SEMANTIC_MATCH',
+    // The raw model object tries to smuggle a second URL into the threshold.
+    threshold: { url: 'https://unverified.example/secret', selector: 'h1' },
+    ttl_seconds: 60,
+  }],
+})}
+\`\`\``, userId, conversationId);
+  assert.ok(unverifiedWebTarget.rule);
+  const canonicalWebThreshold = JSON.parse(unverifiedWebTarget.subSentinels?.[0]?.threshold || '{}');
+  assert.equal(canonicalWebThreshold.url, undefined, 'unsupported alternate web URL must be stripped at persistence');
+  assert.equal(unverifiedWebTarget.subSentinels?.[0]?.target_source, 'https://verified.example/page');
   console.log('PASS synthesized condition trees bind local keys to durable IDs and reject invalid combinations');
 }
 

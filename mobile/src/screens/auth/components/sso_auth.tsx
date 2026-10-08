@@ -17,7 +17,6 @@ export function SSOAuth() {
   const [loadingAction, setLoadingAction] = useState<OAuthStrategy | null>(null);
 
   useEffect(() => {
-    // Custom Tabs prewarming exists only on native platforms.
     if (Platform.OS === 'web') return undefined;
     void WebBrowser.warmUpAsync();
     return () => {
@@ -53,9 +52,8 @@ export function SSOAuth() {
       });
 
       if (createdSessionId) {
-        if (setActive) {
-          await setActive({ session: createdSessionId });
-        }
+        if (!setActive) throw new Error("Clerk session activation is unavailable.");
+        await setActive({ session: createdSessionId });
         Toast.show({
           type: "success",
           text1: "Access Granted",

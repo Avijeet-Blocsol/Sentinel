@@ -44,6 +44,14 @@ async function runAgentTests() {
 
   console.log('  [PASS] All registered tools verified:', toolNames.join(', '));
 
+  const draftAgent = new SentinelAgent({ enableTools: false });
+  const draftToolNames = draftAgent.agent.tools.map((tool) => tool.name);
+  console.assert(
+    draftToolNames.length === 1 && draftToolNames[0] === 'request_clarification',
+    `Draft turns must expose only request_clarification, got ${draftToolNames.join(', ')}`,
+  );
+  console.log('  [PASS] Draft-turn tool contract is limited to request_clarification.');
+
   // ---------------------------------------------------------
   // 2. Test ConcurrentToolExecutor & System Prompt
   // ---------------------------------------------------------

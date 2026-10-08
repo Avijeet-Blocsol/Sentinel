@@ -62,7 +62,7 @@ export class CoinbaseClient {
         }>;
 
         this.productsCache = raw
-          .filter((p) => p.quote_currency === 'USD' && p.status === 'online')
+          .filter((p) => p.status === 'online')
           .map((p) => ({
             id: p.id,
             baseCurrency: p.base_currency,
@@ -84,16 +84,25 @@ export class CoinbaseClient {
     });
   }
 
-  async resolveProduct(symbolOrName: string, options?: number | ClientRequestOptions): Promise<CoinbaseProduct | null> {
-    const clean = symbolOrName.trim().toUpperCase().replace(/[-_/]USD$/, '');
+  async resolveProduct(
+    symbolOrName: string,
+    options?: number | ClientRequestOptions,
+    quoteCurrency = 'USD',
+  ): Promise<CoinbaseProduct | null> {
+    const quote = quoteCurrency.trim().toUpperCase();
+    const normalized = symbolOrName.trim().toUpperCase();
+    const suffix = `-${quote}`;
+    const clean = normalized.endsWith(suffix)
+      ? normalized.slice(0, -suffix.length)
+      : normalized.replace(/[-_/][A-Z]{3,8}$/, '');
     const products = await this.getProducts(options);
 
-    // 1. Exact base currency match (e.g. "BTC" -> "BTC-USD")
-    const exact = products.find((p) => p.baseCurrency === clean);
+    // 1. Exact base/quote match (e.g. "BTC" + "EUR" -> "BTC-EUR")
+    const exact = products.find((p) => p.baseCurrency === clean && p.quoteCurrency === quote);
     if (exact) return exact;
 
-    // 2. Exact product id match (e.g. "BTC-USD")
-    const idMatch = products.find((p) => p.id === clean || p.id === `${clean}-USD`);
+    // 2. Exact product id match
+    const idMatch = products.find((p) => p.id === normalized || p.id === `${clean}-${quote}`);
     if (idMatch) return idMatch;
 
     return null;

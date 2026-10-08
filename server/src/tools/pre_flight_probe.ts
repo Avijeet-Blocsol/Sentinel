@@ -29,6 +29,10 @@ export function createPreFlightProbeTool() {
       targetSource: z
         .string()
         .describe('Target identifier: ticker symbol, URL, Polymarket slug, or RSS feed link'),
+      currency: z
+        .string()
+        .optional()
+        .describe('Explicit quote currency for stock or crypto price verification (for example USD, EUR, GBP)'),
       selectorOrCondition: z
         .string()
         .optional()
@@ -37,6 +41,7 @@ export function createPreFlightProbeTool() {
     callback: async (input: {
       targetType: 'STOCK' | 'CRYPTO' | 'PREDICTION_MARKET' | 'WEB_OBSERVER' | 'RSS_FEED';
       targetSource: string;
+      currency?: string;
       selectorOrCondition?: string;
     }) => {
       const startTime = Date.now();
@@ -56,6 +61,7 @@ export function createPreFlightProbeTool() {
               passed: true,
               targetType: 'STOCK',
               targetSource: input.targetSource.toUpperCase(),
+              currency: quote.currency,
               baselineValue: `$${quote.currentPrice.toFixed(2)}`,
               currentNumericValue: quote.currentPrice,
               latencyMs: Date.now() - startTime,
@@ -64,7 +70,28 @@ export function createPreFlightProbeTool() {
           }
 
           case 'CRYPTO': {
-            const quote = await coinbase.getSpotPrice(input.targetSource.toUpperCase());
+            const requestedCurrency = input.currency?.trim().toUpperCase();
+            if (!requestedCurrency) {
+              return {
+                passed: false,
+                targetType: 'CRYPTO',
+                targetSource: input.targetSource.toUpperCase(),
+                reason: 'Crypto price verification requires an explicit quote currency.',
+                latencyMs: Date.now() - startTime,
+              };
+            }
+            const product = await coinbase.resolveProduct(input.targetSource, undefined, requestedCurrency);
+            if (!product) {
+              return {
+                passed: false,
+                targetType: 'CRYPTO',
+                targetSource: input.targetSource.toUpperCase(),
+                currency: requestedCurrency,
+                reason: `No live Coinbase ${requestedCurrency} market was found for crypto token "${input.targetSource}".`,
+                latencyMs: Date.now() - startTime,
+              };
+            }
+            const quote = await coinbase.getSpotPrice(product.id);
             if (!quote || typeof quote.price !== 'number') {
               return {
                 passed: false,
@@ -76,10 +103,11 @@ export function createPreFlightProbeTool() {
               passed: true,
               targetType: 'CRYPTO',
               targetSource: input.targetSource.toUpperCase(),
-              baselineValue: `$${quote.price.toLocaleString()}`,
+              currency: product.quoteCurrency,
+              baselineValue: `${product.quoteCurrency} ${quote.price.toLocaleString()}`,
               currentNumericValue: quote.price,
               latencyMs: Date.now() - startTime,
-              details: `Live crypto spot verified via Coinbase. Current price: $${quote.price.toLocaleString()}.`,
+              details: `Live crypto spot verified via Coinbase (${product.id}). Current price: ${product.quoteCurrency} ${quote.price.toLocaleString()}.`,
             };
           }
 
@@ -179,6 +207,7 @@ export function createPreFlightProbeTool() {
               passed: true,
               targetType: 'WEB_OBSERVER',
               targetSource: input.targetSource,
+              selectorOrCondition: input.selectorOrCondition,
               baselineValue: extractedText.slice(0, 150) || 'Page loaded cleanly (HTTP 200)',
               latencyMs: Date.now() - startTime,
               details: `Web observer verified HTTP 200. Extracted initial text: "${extractedText.slice(0, 80)}..."`,

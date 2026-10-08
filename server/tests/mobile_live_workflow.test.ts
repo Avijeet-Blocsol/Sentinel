@@ -58,7 +58,7 @@ async function run(): Promise<void> {
   process.env.SENTINEL_INFRASTRUCTURE_MODE = 'local';
   process.env.DATABASE_PROVIDER = 'sqlite';
   process.env.DATABASE_PATH = join(tempDirectory, 'sentinel.db');
-  process.env.SENTINEL_ALLOW_INSECURE_LOCAL_AUTH = 'true';
+  process.env.WS_TICKET_SECRET = 'mobile-live-test-secret';
   process.env.SENTINEL_PUSH_NOTIFICATIONS_ENABLED = 'false';
 
   const [{ buildServer }, repositories, deployment] = await Promise.all([
@@ -66,10 +66,34 @@ async function run(): Promise<void> {
     import('../src/db/index.js'),
     import('../src/services/deployment_workflow.js'),
   ]);
-  const app = await buildServer({ logger: false });
+  const userId = `mobile_live_${Date.now()}`;
+  const app = await buildServer({
+    logger: false,
+    // Test authentication is injected at the server boundary instead of
+    // weakening the production Clerk verifier with a local token fallback.
+    authPreHandler: async (request) => {
+      request.user = {
+        id: userId,
+        email: `${userId}@test.invalid`,
+        name: 'Mobile Workflow Test User',
+        created_at: Date.now(),
+        updated_at: Date.now(),
+      };
+    },
+  });
   const address = await app.listen({ host: '127.0.0.1', port: 0 });
   console.log('STEP server listening');
-  const userId = `mobile_live_${Date.now()}`;
+  await repositories.userRepository.create({
+    id: userId,
+    google_sub: null,
+    apple_sub: null,
+    github_sub: null,
+    email: `${userId}@test.invalid`,
+    name: 'Mobile Workflow Test User',
+    avatar_url: null,
+    created_at: Date.now(),
+    updated_at: Date.now(),
+  });
   const http = new HttpAdapter({
     baseUrl: address,
     getToken: async () => userId,
@@ -197,7 +221,7 @@ async function run(): Promise<void> {
       'INTERRUPT_RESOLVED',
       (event) => event.payload.interruptId === interruptId,
     );
-    mobileClient.resolveInterrupt(interruptId, 'APPROVED');
+    mobileClient.resolveInterrupt(interruptId, 'APPROVED', 'approve');
     assert.equal(useSentinelStore.getState().resolvingInterruptIds[interruptId], true);
     assert.equal((await resolved).payload.resolution, 'APPROVED');
     console.log('STEP interrupt approved');
@@ -219,7 +243,7 @@ async function run(): Promise<void> {
     await app.close();
     await repositories.closeDatabase();
     rmSync(tempDirectory, { recursive: true, force: true });
-    delete process.env.SENTINEL_ALLOW_INSECURE_LOCAL_AUTH;
+    delete process.env.WS_TICKET_SECRET;
   }
 
   console.log('PASS live mobile HTTP + WebSocket + search + dashboard + interrupt workflow');

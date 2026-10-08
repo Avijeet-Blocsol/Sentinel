@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto';
 import {
   isInterruptResolutionText,
   isTaskStatusInquiry,
+  isTaskContextQuestion,
   isTaskModificationAttempt,
   classifyUserInput,
   generateSteeringResponse,
@@ -72,29 +73,13 @@ async function runLifecycleTests() {
   // -------------------------------------------------------------
   console.log('\n--- Test 2: Input Classification & NLP Interrupt Resolution ---');
 
-  // Positive Approvals
-  const approvals = ['confirm', 'Confirm & Deploy', 'looks good', 'proceed', 'yes, deploy', 'lgtm', 'approve'];
-  for (const text of approvals) {
-    const res = isInterruptResolutionText(text);
-    assert.strictEqual(res.isResolution, true, `"${text}" should be recognized as interrupt resolution`);
-    assert.strictEqual(res.resolution, 'APPROVED', `"${text}" should resolve as APPROVED`);
+  // Free-form text is never an interrupt action. The mobile choice-card
+  // endpoint is the only supported resolution path.
+  const freeFormMessages = ['confirm', 'Confirm & Deploy', 'cancel', 'tell me a joke'];
+  for (const text of freeFormMessages) {
+    assert.equal(isInterruptResolutionText(text).isResolution, false);
   }
-
-  // Rejections
-  const rejections = ['cancel', 'reject', 'dismiss', 'no', 'stop', 'abort'];
-  for (const text of rejections) {
-    const res = isInterruptResolutionText(text);
-    assert.strictEqual(res.isResolution, true, `"${text}" should be recognized as interrupt resolution`);
-    assert.strictEqual(res.resolution, 'REJECTED', `"${text}" should resolve as REJECTED`);
-  }
-
-  // Non-resolution text
-  const nonResolutions = ['what is your name?', 'tell me a joke', 'check AMD instead', 'status update'];
-  for (const text of nonResolutions) {
-    const res = isInterruptResolutionText(text);
-    assert.strictEqual(res.isResolution, false, `"${text}" should not be an interrupt resolution`);
-  }
-  console.log('  ✔ NLP interrupt resolution matcher verified across all variations');
+  console.log('  ✔ Free-form interrupt resolution is disabled; choice cards are authoritative');
 
   // -------------------------------------------------------------
   // Test 3: Task Status Inquiries & Post-Scout Lockout
@@ -108,8 +93,17 @@ async function runLifecycleTests() {
     'show progress',
     'summary of what has happened',
   ];
-  for (const q of statusInquiries) {
-    assert(isTaskStatusInquiry(q), `"${q}" should be classified as task status inquiry`);
+  for (const q of statusInquiries) assert.equal(isTaskStatusInquiry(q), false);
+
+  const taskQuestions = [
+    'what does this sentinel monitor?',
+    'which sources are being watched?',
+    'what conditions are configured for this task?',
+    'how often does it run?',
+    'why is the task paused?',
+  ];
+  for (const q of taskQuestions) {
+    assert.equal(isTaskContextQuestion(q, { phase: 'DEPLOYED', activeRule: { id: 'rule-1' } as Rule }), false);
   }
 
   const modifications = [
@@ -118,10 +112,8 @@ async function runLifecycleTests() {
     'instead track Tesla',
     'add another condition',
   ];
-  for (const m of modifications) {
-    assert(isTaskModificationAttempt(m), `"${m}" should be classified as modification attempt`);
-  }
-  console.log('  ✔ Status inquiry and modification classifiers verified');
+  for (const m of modifications) assert.equal(isTaskModificationAttempt(m), false);
+  console.log('  ✔ Synchronous semantic classifiers are disabled; the live Strands classifier owns these decisions');
 
   // -------------------------------------------------------------
   // Test 4: State-Aware Categorization & Steering (The "Genuine -> BS" Scenario)
@@ -188,7 +180,15 @@ async function runLifecycleTests() {
 
   // Case 4A: User asks status inquiry during active monitoring
   const statusCategory = classifyUserInput('what is the status?', context);
-  assert.strictEqual(statusCategory, 'TASK_STATUS_INQUIRY');
+  assert.strictEqual(statusCategory, 'AI_UNAVAILABLE');
+  assert.strictEqual(
+    classifyUserInput('what does this sentinel monitor?', context),
+    'AI_UNAVAILABLE'
+  );
+  assert.strictEqual(
+    classifyUserInput('what do you think of space exploration?', context),
+    'AI_UNAVAILABLE'
+  );
   const summary = generateTaskStatusSummary(context);
   assert(summary.includes('Nvidia Drop Alert'), 'Summary must contain rule title');
   assert(summary.includes('NVDA'), 'Summary must contain target source');
@@ -196,7 +196,7 @@ async function runLifecycleTests() {
 
   // Case 4B: User starts asking BS during active task
   const bsCategory = classifyUserInput('what do you think of space exploration?', context);
-  assert.strictEqual(bsCategory, 'OFF_TOPIC_BS');
+  assert.strictEqual(bsCategory, 'AI_UNAVAILABLE');
   const steerResponse = generateSteeringResponse(context);
   assert(steerResponse.includes('Nvidia Drop Alert'), 'Steering message must anchor to active task');
   assert(steerResponse.includes('actively running'), 'Steering message must remind user task is active');
@@ -233,14 +233,14 @@ async function runLifecycleTests() {
 
   // User sends random BS while interrupt is PENDING
   const blockedCategory = classifyUserInput('write me a poem about butterflies', blockedContext);
-  assert.strictEqual(blockedCategory, 'OFF_TOPIC_BS');
+  assert.strictEqual(blockedCategory, 'AI_UNAVAILABLE');
   const blockSteer = generateSteeringResponse(blockedContext);
   assert(blockSteer.includes('Action Required'), 'Block response must mandate card decision');
   console.log('  Interrupt Blockade Response:\n', blockSteer);
 
-  // User resolves interrupt via natural language
+  // Free-form text cannot resolve an interrupt; only the card endpoint may do so.
   const resolveCategory = classifyUserInput('confirm & deploy', blockedContext);
-  assert.strictEqual(resolveCategory, 'INTERRUPT_RESOLUTION');
+  assert.strictEqual(resolveCategory, 'AI_UNAVAILABLE');
 
   // Simulate resolution & baseline seeding
   await interruptActionRepository.updateStatus(pendingInterrupt.id, 'APPROVED');
@@ -320,53 +320,20 @@ async function runLifecycleTests() {
   const discoveryContext: ConversationStateContext = { phase: 'DISCOVERY' };
 
   // False-positive prevention: "watch" or "alert" without domain context
-  assert.strictEqual(
-    classifyUserInput('watch this youtube video with me', discoveryContext),
-    'OFF_TOPIC_BS',
-    '"watch this youtube video" should be OFF_TOPIC_BS'
-  );
-  assert.strictEqual(
-    classifyUserInput('can you feed my dog tomorrow', discoveryContext),
-    'OFF_TOPIC_BS',
-    '"feed my dog" should be OFF_TOPIC_BS'
-  );
-  assert.strictEqual(
-    classifyUserInput('what is the price of milk', discoveryContext),
-    'OFF_TOPIC_BS',
-    '"price of milk" should be OFF_TOPIC_BS'
-  );
+  assert.equal(classifyUserInput('watch this youtube video with me', discoveryContext), 'AI_UNAVAILABLE');
+  assert.equal(classifyUserInput('can you feed my dog tomorrow', discoveryContext), 'AI_UNAVAILABLE');
+  assert.equal(classifyUserInput('what is the price of milk', discoveryContext), 'AI_UNAVAILABLE');
 
   // True-positive monitoring intents
-  assert.strictEqual(
-    classifyUserInput('watch AAPL stock price', discoveryContext),
-    'SENTINEL_INTENT',
-    '"watch AAPL stock price" should be SENTINEL_INTENT'
-  );
-  assert.strictEqual(
-    classifyUserInput('notify me if bitcoin exceeds 100k', discoveryContext),
-    'SENTINEL_INTENT',
-    '"notify me if bitcoin exceeds 100k" should be SENTINEL_INTENT'
-  );
-  assert.strictEqual(
-    classifyUserInput('alert me if polymarket probability drops below 40%', discoveryContext),
-    'SENTINEL_INTENT',
-    '"alert me if polymarket probability drops" should be SENTINEL_INTENT'
-  );
+  assert.equal(classifyUserInput('watch AAPL stock price', discoveryContext), 'AI_UNAVAILABLE');
+  assert.equal(classifyUserInput('notify me if bitcoin exceeds 100k', discoveryContext), 'AI_UNAVAILABLE');
+  assert.equal(classifyUserInput('alert me if polymarket probability drops below 40%', discoveryContext), 'AI_UNAVAILABLE');
 
   // Unanchored modification checks
-  assert(
-    isTaskModificationAttempt('can you change the price to $120?'),
-    '"can you change the price" should be detected as modification'
-  );
-  assert(
-    isTaskModificationAttempt('hey please also monitor ETH'),
-    '"also monitor ETH" should be detected as modification'
-  );
-  assert(
-    isTaskModificationAttempt('instead of that, track Tesla'),
-    '"instead of that, track Tesla" should be detected as modification'
-  );
-  console.log('  ✔ Narrowed classification and unanchored modification detection verified');
+  assert.equal(isTaskModificationAttempt('can you change the price to $120?'), false);
+  assert.equal(isTaskModificationAttempt('hey please also monitor ETH'), false);
+  assert.equal(isTaskModificationAttempt('instead of that, track Tesla'), false);
+  console.log('  ✔ No local modification or intent fallback remains');
 
   console.log('\n🎉 ALL AGENTIC LOOP & LIFECYCLE TESTS COMPLETED SUCCESSFULLY!\n');
 }

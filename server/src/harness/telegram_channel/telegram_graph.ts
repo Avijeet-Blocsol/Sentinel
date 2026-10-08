@@ -17,6 +17,11 @@ import {
   type TelegramDossier,
   type SimulationVerdict,
 } from './types.js';
+import {
+  extractSemanticQueryFields,
+  parseJsonValue,
+  type TelegramSemanticFields,
+} from '../../agent/structured_query_agent.js';
 
 /**
  * ==========================================================
@@ -143,6 +148,59 @@ export function parseTelegramQuery(task: TelegramResearchTask): ParsedTelegramQu
   };
 }
 
+/** Uses Strands for semantic Telegram-query extraction, then reuses the
+ * deterministic parser and handle/field validation as the authority. */
+export async function parseTelegramQueryWithAgent(
+  task: TelegramResearchTask,
+  options?: { signal?: AbortSignal; timeoutMs?: number }
+): Promise<ParsedTelegramQuery> {
+  const semantic = await extractSemanticQueryFields<TelegramSemanticFields>('TELEGRAM', task.query, options);
+  if (!semantic) return parseTelegramQuery(task);
+
+  const enriched: TelegramResearchTask = { ...task };
+  if (
+    !enriched.channelHandle &&
+    typeof semantic.channelHandle === 'string' &&
+    /^[a-zA-Z0-9_]{3,64}$/.test(semantic.channelHandle.trim().replace(/^@+/, ''))
+  ) {
+    enriched.channelHandle = semantic.channelHandle.trim().replace(/^@+/, '');
+  }
+  if (
+    (!enriched.keywords || enriched.keywords.length === 0) &&
+    Array.isArray(semantic.keywords)
+  ) {
+    const keywords = semantic.keywords.filter(
+      (keyword): keyword is string => typeof keyword === 'string' && keyword.trim().length > 0
+    );
+    if (keywords.length > 0) enriched.keywords = keywords.slice(0, 25);
+  }
+  if (!enriched.matchMode && (semantic.matchMode === 'ANY' || semantic.matchMode === 'ALL' || semantic.matchMode === 'EXACT')) {
+    enriched.matchMode = semantic.matchMode;
+  }
+  if (
+    enriched.minViews === undefined &&
+    Number.isInteger(semantic.minViews) &&
+    Number(semantic.minViews) >= 0 &&
+    Number(semantic.minViews) <= 1_000_000_000
+  ) {
+    enriched.minViews = Number(semantic.minViews);
+  }
+  if (enriched.mediaOnly === undefined && typeof semantic.mediaOnly === 'boolean') {
+    enriched.mediaOnly = semantic.mediaOnly;
+  }
+  if (!enriched.semanticFilter && typeof semantic.semanticFilter === 'string' && semantic.semanticFilter.trim()) {
+    enriched.semanticFilter = semantic.semanticFilter.trim();
+  }
+  if (
+    !enriched.expectedOperator &&
+    (semantic.expectedOperator === 'KEYWORD_MATCH' || semantic.expectedOperator === 'SEMANTIC_MATCH')
+  ) {
+    enriched.expectedOperator = semantic.expectedOperator;
+  }
+
+  return parseTelegramQuery(enriched);
+}
+
 /**
  * Checks if a message text matches the given keywords under the specified mode.
  * Uses strict word boundaries (\b) to avoid substring false positives.
@@ -244,30 +302,19 @@ export async function evaluateTelegramSemanticFilter(
           ? (response as any).toString()
           : '';
 
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) {
+      const parsedValue = parseJsonValue(text);
+      if (!parsedValue || typeof parsedValue !== 'object' || Array.isArray(parsedValue)) {
         throw new ProviderError(
           'BEDROCK',
           undefined,
-          `Semantic evaluation failed: model returned malformed output (no JSON found in "${text.slice(
+          `Semantic evaluation failed: model returned malformed output (no valid JSON object found in "${text.slice(
             0,
             80
           )}")`
         );
       }
 
-      let parsed: any;
-      try {
-        parsed = JSON.parse(jsonMatch[0]);
-      } catch (jsonErr) {
-        throw new ProviderError(
-          'BEDROCK',
-          undefined,
-          `Semantic evaluation failed: invalid JSON in model response (${
-            jsonErr instanceof Error ? jsonErr.message : String(jsonErr)
-          })`
-        );
-      }
+      const parsed = parsedValue as { matches?: unknown };
 
       if (!Array.isArray(parsed?.matches)) {
         throw new ProviderError(
@@ -455,7 +502,10 @@ export async function* runTelegramPipeline(
     timestamp: Date.now(),
   };
 
-  const parsed = parseTelegramQuery(task);
+  const parsed = await parseTelegramQueryWithAgent(task, {
+    signal,
+    timeoutMs: Math.min(5000, config.timeoutMs ?? 5000),
+  });
 
   if (parsed.matchModeConflictDetected) {
     yield {

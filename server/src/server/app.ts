@@ -12,16 +12,10 @@ import {
   errorHandler,
   requireAuth,
 } from '../middlewares/index.js';
-import { userRoutes } from './routes/users.js';
-import { conversationRoutes } from './routes/conversations.js';
-import { ruleRoutes } from './routes/rules.js';
-import { interruptRoutes } from './routes/interrupts.js';
-import { alertRoutes } from './routes/alerts.js';
-import { wsRoutes } from './routes/ws.js';
-import { engineRoutes } from './routes/engine.js';
-import { wsTicketRoutes } from './routes/ws_ticket.js';
+import { registerApiRoutes } from '../api/index.js';
 import { activeProvider, checkDatabaseReadiness } from '../db/index.js';
 import { getProductionConfigurationIssues } from '../config/production_readiness.js';
+import { redactRequestUrl } from '../middlewares/error-handler.js';
 
 export interface BuildServerOptions extends FastifyServerOptions {
   /** Optional custom auth preHandler hook (useful for testing/mocking) */
@@ -30,9 +24,19 @@ export interface BuildServerOptions extends FastifyServerOptions {
 
 export async function buildServer(opts: BuildServerOptions = {}): Promise<FastifyInstance> {
   const { authPreHandler = requireAuth, ...fastifyOpts } = opts;
+  const defaultLogger = {
+    serializers: {
+      req: (request: { method?: string; url?: string; hostname?: string; ip?: string }) => ({
+        method: request.method,
+        url: redactRequestUrl(request.url || '/'),
+        hostname: request.hostname,
+        remoteAddress: request.ip,
+      }),
+    },
+  };
 
   const app = fastify({
-    logger: true,
+    logger: fastifyOpts.logger === undefined ? defaultLogger : fastifyOpts.logger,
     bodyLimit: 1048576, // 1MB payload ceiling
     ...fastifyOpts,
   });
@@ -99,14 +103,7 @@ export async function buildServer(opts: BuildServerOptions = {}): Promise<Fastif
     protectedApp.addHook('preHandler', authPreHandler);
 
     // 6. Register API and realtime routes
-    await protectedApp.register(userRoutes, { prefix: '/api/users' });
-    await protectedApp.register(conversationRoutes, { prefix: '/api/conversations' });
-    await protectedApp.register(ruleRoutes, { prefix: '/api/rules' });
-    await protectedApp.register(interruptRoutes, { prefix: '/api/interrupts' });
-    await protectedApp.register(alertRoutes, { prefix: '/api/alerts' });
-    await protectedApp.register(engineRoutes, { prefix: '/api/engine' });
-    await protectedApp.register(wsTicketRoutes, { prefix: '/api/ws' });
-    await protectedApp.register(wsRoutes, { prefix: '/ws/conversation' });
+    await registerApiRoutes(protectedApp);
   });
 
   return app;

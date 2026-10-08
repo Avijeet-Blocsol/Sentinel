@@ -19,7 +19,7 @@ import {
   GetPendingInterruptsResponseSchema,
   ListAlertsResponseSchema,
 } from '@sentinel/shared';
-import { HttpAdapter, HttpError } from '../http_adapter';
+import { HttpAdapter, HttpError, isCancellation } from '../http_adapter';
 import { WsAdapter } from '../ws_adapter';
 import { SentinelClient } from '../sentinel_client';
 import { useSentinelStore } from '../../store/useSentinelStore';
@@ -133,6 +133,8 @@ describe('HTTP Adapter & Schema Verification', () => {
         assert.ok(error instanceof HttpError);
         assert.strictEqual(error.statusCode, 499);
         assert.strictEqual(error.error, 'Cancelled');
+        assert.strictEqual(isCancellation(error), true);
+        assert.strictEqual(isCancellation(new HttpError(408, 'Timeout', 'timed out')), false);
         return true;
       });
     } finally {
@@ -171,8 +173,8 @@ describe('HTTP Adapter & Schema Verification', () => {
         authorization: headers.get('Authorization'),
         accept: headers.get('Accept'),
       });
-      return new Response(JSON.stringify({ statusCode: 401, error: 'Unauthorized', message: 'fixture' }), {
-        status: 401,
+      return new Response(JSON.stringify({ statusCode: 400, error: 'BadRequest', message: 'fixture' }), {
+        status: 400,
         headers: { 'content-type': 'application/json' },
       });
     }) as typeof fetch;
@@ -225,12 +227,33 @@ describe('WebSocket Adapter & Realtime Protocol Verification', () => {
       payload: {
         interruptId: '123e4567-e89b-12d3-a456-426614174010',
         resolution: 'APPROVED' as const,
+        choiceId: 'approve',
+      },
+    };
+    const clarificationResolveMsg = {
+      type: 'RESOLVE_INTERRUPT' as const,
+      payload: {
+        interruptId: '123e4567-e89b-12d3-a456-426614174011',
+        resolution: 'APPROVED' as const,
+        choiceId: 'official',
       },
     };
 
     assert.ok(WsClientMessageSchema.safeParse(pingMsg).success);
     assert.ok(WsClientMessageSchema.safeParse(chatMsg).success);
     assert.ok(WsClientMessageSchema.safeParse(resolveMsg).success);
+    assert.ok(WsClientMessageSchema.safeParse(clarificationResolveMsg).success);
+    assert.equal(
+      WsClientMessageSchema.safeParse({
+        type: 'RESOLVE_INTERRUPT',
+        payload: {
+          interruptId: '123e4567-e89b-12d3-a456-426614174010',
+          resolution: 'APPROVED',
+        },
+      }).success,
+      false,
+      'natural-language-only interrupt resolution must be rejected',
+    );
   });
 
   it('validates inbound server message schemas', () => {
@@ -281,6 +304,33 @@ describe('WebSocket Adapter & Realtime Protocol Verification', () => {
       },
     };
     assert.ok(WsServerMessageSchema.safeParse(interruptEvent).success);
+
+    const clarificationEvent = {
+      type: 'INTERRUPT_REQUEST' as const,
+      payload: {
+        id: '123e4567-e89b-12d3-a456-426614174041',
+        alert_id: null,
+        rule_id: null,
+        conversation_id: '123e4567-e89b-12d3-a456-426614174001',
+        user_id: 'user_mock_001',
+        action_type: 'CLARIFICATION_REQUIRED',
+        action_payload: JSON.stringify({
+          kind: 'CLARIFICATION_REQUIRED',
+          question: 'Which source should Sentinel monitor?',
+          choices: [
+            { id: 'official', label: 'Official source', description: 'Prefer primary sources.' },
+            { id: 'community', label: 'Community sources' },
+          ],
+          resume_phase: 'SCOUTING',
+        }),
+        status: 'PENDING',
+        expires_at: 1720000060000,
+        created_at: 1720000000000,
+        resolved_at: null,
+        rule_title: null,
+      },
+    };
+    assert.ok(WsServerMessageSchema.safeParse(clarificationEvent).success);
   });
 
   it('manages event subscriptions and unsubscriptions in WsAdapter', () => {
@@ -313,6 +363,33 @@ describe('WebSocket Adapter & Realtime Protocol Verification', () => {
     );
 
     assert.strictEqual(received, false);
+  });
+
+  it('coalesces queued interrupt resolutions by interrupt id', () => {
+    const ws = new WsAdapter({ baseUrl: 'ws://localhost:8080' });
+    const conversationId = 'conversation-1';
+    const interruptId = 'interrupt-1';
+    const queue = (ws as any).queueOutgoingMessage.bind(ws);
+
+    assert.equal(queue({
+      conversationId,
+      message: {
+        type: 'RESOLVE_INTERRUPT',
+        payload: { interruptId, resolution: 'APPROVED', choiceId: 'confirm' },
+      },
+    }), true);
+    assert.equal(queue({
+      conversationId,
+      message: {
+        type: 'RESOLVE_INTERRUPT',
+        payload: { interruptId, resolution: 'APPROVED', choiceId: 'confirm' },
+      },
+    }), true);
+
+    const queued = (ws as any).outgoingQueue as Array<{ message: { type: string } }>;
+    assert.equal(queued.length, 1);
+    assert.equal(queued[0].message.type, 'RESOLVE_INTERRUPT');
+    ws.disconnect();
   });
 
   it('refuses to construct an unauthenticated WebSocket when no ticket is issued', async () => {
@@ -406,6 +483,7 @@ describe('Unified SentinelClient & Store Reactivity', () => {
       payload: {
         interruptId: '123e4567-e89b-12d3-a456-426614174122',
         resolution: 'REJECTED',
+        choiceId: 'reject',
         actionResult: 'Dismissed',
         resolvedAt: 1720000000001,
       },
@@ -508,6 +586,97 @@ describe('Unified SentinelClient & Store Reactivity', () => {
     assert.strictEqual(updatedState.chatMessages.length, 1);
     assert.strictEqual(updatedState.chatMessages[0].content, promptText);
 
+    client.destroy();
+  });
+
+  it('dispatchPrompt with forceNew creates a fresh conversation even if one was active', async () => {
+    const client = new SentinelClient();
+    const store = useSentinelStore.getState();
+    store.resetSession();
+    store.setActiveConversationId('conv_old_111');
+    store.setActiveConversationTitle('Old conversation');
+    store.setChatMessages([{
+      id: 'old_msg_1',
+      conversation_id: 'conv_old_111',
+      role: 'user',
+      content: 'Old message',
+      created_at: 1000,
+    }]);
+
+    let createdTitle = '';
+    let connectedConvId = '';
+    (client.http as any).createConversation = async ({ title }: { title: string }) => {
+      createdTitle = title;
+      return {
+        conversation: {
+          id: 'conv_brand_new_222',
+          user_id: 'user_mock_001',
+          title,
+          status: 'ACTIVE',
+          phase: 'DISCOVERY',
+          created_at: Date.now(),
+        },
+      };
+    };
+    (client.ws as any).connect = async (convId: string) => {
+      connectedConvId = convId;
+    };
+    (client.ws as any).sendChatMessage = () => true;
+
+    const newPrompt = 'Brand new Sentinel task from home';
+    const convId = await client.dispatchPrompt(newPrompt, { forceNew: true });
+
+    assert.strictEqual(convId, 'conv_brand_new_222');
+    assert.strictEqual(createdTitle, newPrompt);
+    assert.strictEqual(connectedConvId, 'conv_brand_new_222');
+
+    const updatedState = useSentinelStore.getState();
+    assert.strictEqual(updatedState.activeConversationId, 'conv_brand_new_222');
+    assert.strictEqual(updatedState.chatMessages.length, 1);
+    assert.strictEqual(updatedState.chatMessages[0].content, newPrompt);
+
+    client.destroy();
+  });
+
+  it('tracks View Status requests and clears the pending state on the status response', () => {
+    const client = new SentinelClient();
+    const store = useSentinelStore.getState();
+    store.resetSession();
+    store.setActiveConversationId('conv_status_001');
+
+    let sentContent = '';
+    (client.ws as any).getActiveConversationId = () => 'conv_status_001';
+    (client.ws as any).sendChatMessage = (content: string) => {
+      sentContent = content;
+      return true;
+    };
+
+    assert.strictEqual(client.requestTaskStatus(), true);
+    assert.strictEqual(sentContent, 'What is the current task status?');
+    assert.strictEqual(useSentinelStore.getState().statusRequestInFlight, true);
+    assert.ok(
+      useSentinelStore.getState().chatMessages.some((message) => message.content === sentContent)
+    );
+
+    (client.ws as any).handleInboundMessage(
+      JSON.stringify({
+        type: 'AGENT_CHAT_DONE',
+        payload: {
+          messageId: '123e4567-e89b-12d3-a456-426614174130',
+          content: 'The task is currently running.',
+          rule: null,
+          subSentinels: [],
+          interrupt: null,
+        },
+      })
+    );
+
+    assert.strictEqual(useSentinelStore.getState().statusRequestInFlight, false);
+    assert.ok(
+      useSentinelStore
+        .getState()
+        .chatMessages.some((message) => message.content === 'The task is currently running.')
+    );
     client.destroy();
   });
 

@@ -3,8 +3,12 @@
  * Integrates HttpAdapter and WsAdapter with Zustand reactive state management.
  */
 
-import type { ChatMessage } from '@sentinel/shared';
-import { HttpAdapter, HttpError, type TokenProvider } from './http_adapter';
+import {
+  ChoiceInterruptPayloadSchema,
+  isChoiceInterruptActionType,
+  type ChatMessage,
+} from '@sentinel/shared';
+import { HttpAdapter, isCancellation, type TokenProvider } from './http_adapter';
 import { WsAdapter, type WsConnectionStatus } from './ws_adapter';
 import { useSentinelStore } from '../store/useSentinelStore';
 
@@ -92,7 +96,7 @@ export class SentinelClient {
         // Read-only status responses may arrive while a scouting turn is still
         // streaming. They intentionally have no turnId; append them as an
         // independent durable message without clearing the active stream.
-        if (!event.payload.turnId && this.statusRequestInFlight && store.isGenerating) {
+        if (!event.payload.turnId && this.statusRequestInFlight) {
           store.addChatMessage({
             id: event.payload.messageId,
             conversation_id: store.activeConversationId || '',
@@ -101,9 +105,16 @@ export class SentinelClient {
             created_at: Date.now(),
           });
         } else {
-          store.finishStreaming(content, event.payload.turnId);
+          store.finishStreaming(content, event.payload.turnId, event.payload.messageId);
         }
-        if (!event.payload.turnId) this.statusRequestInFlight = false;
+        if (!event.payload.turnId) {
+          this.statusRequestInFlight = false;
+          store.setStatusRequestInFlight(false);
+        }
+
+        if (event.payload.phase && store.activeConversationId) {
+          store.updateConversationPhase(store.activeConversationId, event.payload.phase);
+        }
 
         if (rule) {
           store.addRule(rule, subSentinels);
@@ -118,13 +129,48 @@ export class SentinelClient {
     // 4. Probe & market telemetry updates
     this.unsubscribers.push(
       this.ws.on('TELEMETRY_UPDATE', (event) => {
-        useSentinelStore.getState().addTelemetryPoint(event.payload);
+        const store = useSentinelStore.getState();
+        store.addTelemetryPoint(event.payload);
+        if (event.payload.rule_id === store.activeConversationId) {
+          try {
+            const metadata = event.payload.metadata
+              ? JSON.parse(event.payload.metadata) as { stage?: string }
+              : null;
+            if (metadata?.stage === 'WAITING_FOR_CHOICE' || metadata?.stage === 'FAILED') {
+              store.setIsGenerating(false);
+              store.clearStreaming();
+            }
+          } catch {
+            // Telemetry metadata is optional and must not break the stream.
+          }
+        }
       })
     );
+
+    const applySubSentinelEvaluation = (event: import('@sentinel/shared').SubSentinelEvaluatedEvent) => {
+      const { subSentinelId, ruleId, isSatisfied, currentValue, timestamp } = event.payload;
+      const store = useSentinelStore.getState();
+      store.updateSubSentinel({
+        id: subSentinelId,
+        rule_id: ruleId,
+        is_satisfied: isSatisfied ? 1 : 0,
+        last_evaluated_at: timestamp,
+        state_payload: JSON.stringify({
+          currentValue,
+          sourceTimestamp: timestamp,
+        }),
+      });
+      // TELEMETRY_UPDATE is emitted alongside this event for chart history.
+      // This event updates the live card state without duplicating chart points.
+    };
+    this.unsubscribers.push(this.ws.on('SUB_SENTINEL_EVALUATED', applySubSentinelEvaluation));
+    this.unsubscribers.push(this.ws.on('SENTRY_EVALUATED', applySubSentinelEvaluation));
 
     // 5. HITL Interrupt requested
     this.unsubscribers.push(
       this.ws.on('INTERRUPT_REQUEST', (event) => {
+        this.statusRequestInFlight = false;
+        useSentinelStore.getState().setStatusRequestInFlight(false);
         useSentinelStore.getState().addPendingAction(event.payload);
         useSentinelStore.getState().setIsGenerating(false);
         useSentinelStore.getState().clearStreaming();
@@ -140,10 +186,52 @@ export class SentinelClient {
         this.resolvingInterruptId = null;
         const store = useSentinelStore.getState();
         store.resolveInterruptAction(event.payload.interruptId, event.payload.resolution as 'APPROVED' | 'REJECTED');
+        const isChoiceInterrupt = Boolean(action && isChoiceInterruptActionType(action.action_type));
+        if (isChoiceInterrupt && action?.conversation_id) {
+          // The activity that led to the card belongs to the completed turn.
+          // Remove it so the resumed draft reports its own current status.
+          store.clearTelemetry(action.conversation_id);
+        }
+        if (event.payload.resolution === 'APPROVED' && isChoiceInterrupt && action?.conversation_id && event.payload.choiceId) {
+          try {
+            const parsed = JSON.parse(action.action_payload);
+            const payload = ChoiceInterruptPayloadSchema.safeParse(parsed);
+            const selectedChoice = payload.success
+              ? payload.data.choices.find((choice) => choice.id === event.payload.choiceId)
+              : undefined;
+            const userContent = event.payload.responseText?.trim() || selectedChoice?.label;
+            if (userContent && store.activeConversationId) {
+              store.addChatMessage({
+                id: `choice_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+                conversation_id: store.activeConversationId,
+                role: 'user',
+                content: userContent,
+                created_at: Date.now(),
+              });
+            }
+          } catch {
+            // The durable server transcript remains authoritative if the card
+            // payload cannot be decoded locally.
+          }
+        }
+        // Selecting a clarification immediately resumes the agent turn after
+        // the durable interrupt transaction completes.
+        if (
+          event.payload.resolution === 'APPROVED' &&
+          (action?.action_type === 'CLARIFICATION_REQUIRED' || action?.action_type === 'QUERY_CONFIRMATION_REQUIRED')
+        ) {
+          store.clearStreaming();
+          store.setIsGenerating(true);
+        }
         // A rejected proposal is never an active monitor. Remove its staged
         // PAUSED rule immediately instead of waiting for the next dashboard
         // refresh to reconcile the card and rule lists.
-        if (event.payload.resolution === 'REJECTED' && action) {
+        // Only a rejected pre-deployment proposal owns a staged PAUSED rule.
+        // A rejected edit/clarification belongs to an already-active rule and
+        // must never make that rule disappear from the dashboard.
+        const rejectedStagedProposal = action?.action_type === 'CONFIRM_WATCHER' ||
+          action?.action_type === 'MONITORING_MODE_REQUIRED';
+        if (event.payload.resolution === 'REJECTED' && action?.rule_id && rejectedStagedProposal) {
           store.removeRule(action.rule_id);
         }
         // A second device may have completed the durable decision first. The
@@ -165,6 +253,7 @@ export class SentinelClient {
     this.unsubscribers.push(
       this.ws.on('ERROR', (event) => {
         this.statusRequestInFlight = false;
+        useSentinelStore.getState().setStatusRequestInFlight(false);
         useSentinelStore.getState().setIsGenerating(false);
         useSentinelStore.getState().clearStreaming();
         if (this.resolvingInterruptId) {
@@ -181,6 +270,8 @@ export class SentinelClient {
 
     this.unsubscribers.push(
       this.ws.on('INTERRUPT_REQUIRED', (event) => {
+        this.statusRequestInFlight = false;
+        useSentinelStore.getState().setStatusRequestInFlight(false);
         useSentinelStore.getState().setIsGenerating(false);
         useSentinelStore.getState().clearStreaming();
         const action = useSentinelStore
@@ -201,6 +292,8 @@ export class SentinelClient {
     // Do not allow events from the previous task to arrive while the next
     // conversation history is loading into the shared transcript store.
     this.ws.disconnect();
+    this.statusRequestInFlight = false;
+    useSentinelStore.getState().setStatusRequestInFlight(false);
     const controller = new AbortController();
     this.conversationLoadController = controller;
     useSentinelStore.getState().setActiveConversationId(conversationId);
@@ -241,19 +334,25 @@ export class SentinelClient {
     this.conversationLoadController?.abort();
     this.conversationLoadController = null;
     this.ws.disconnect();
+    this.statusRequestInFlight = false;
     useSentinelStore.getState().setActiveConversationId(null);
     useSentinelStore.getState().setActiveConversationTitle(null);
     useSentinelStore.getState().setChatMessages([]);
     useSentinelStore.getState().clearStreaming();
+    useSentinelStore.getState().setStatusRequestInFlight(false);
   }
 
   /**
    * Dispatches a prompt into the active conversation, or creates a new conversation
-   * if none is currently active. Optimistically updates the chat UI immediately.
+   * if none is currently active (or if options.forceNew is true). Optimistically updates the chat UI immediately.
    */
-  public async dispatchPrompt(content: string): Promise<string> {
+  public async dispatchPrompt(content: string, options?: { forceNew?: boolean }): Promise<string> {
     const normalizedContent = content.trim();
     if (!normalizedContent) throw new Error('Cannot send empty prompt');
+
+    if (options?.forceNew) {
+      this.disconnectConversation();
+    }
 
     const store = useSentinelStore.getState();
     let convId = store.activeConversationId;
@@ -322,14 +421,11 @@ export class SentinelClient {
     const normalizedContent = content.trim();
     if (!normalizedContent) return;
     const activeId = this.ws.getActiveConversationId();
-    const hasActiveInterrupt = useSentinelStore.getState().pendingActions.some(
-      (action) => action.conversation_id === activeId &&
-        (!action.expires_at || action.expires_at > Date.now())
-    );
-    if (hasActiveInterrupt) {
-      console.info('[SentinelClient] Chat input blocked while an interrupt is pending');
-      return;
-    }
+    // The server still enforces the interrupt blockade. It permits only
+    // read-only task questions while a card is pending and returns a polite
+    // action-required response for all other free-form input. Keeping this
+    // transport open lets the UI's status action work consistently after a
+    // reconnect without allowing text to resolve or bypass the card.
     const accepted = this.ws.sendChatMessage(normalizedContent);
     if (!accepted) {
       console.warn('[SentinelClient] Chat message was not accepted by the realtime transport');
@@ -357,8 +453,13 @@ export class SentinelClient {
     const activeId = this.ws.getActiveConversationId();
     if (!activeId || this.statusRequestInFlight) return false;
     const content = 'What is the current task status?';
-    if (!this.ws.sendChatMessage(content)) return false;
     this.statusRequestInFlight = true;
+    store.setStatusRequestInFlight(true);
+    if (!this.ws.sendChatMessage(content)) {
+      this.statusRequestInFlight = false;
+      store.setStatusRequestInFlight(false);
+      return false;
+    }
     store.addChatMessage({
       id: `user_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
       conversation_id: activeId,
@@ -374,22 +475,26 @@ export class SentinelClient {
    */
   public resolveInterrupt(
     interruptId: string,
-    resolution: 'APPROVED' | 'REJECTED'
-  ): void {
+    resolution: 'APPROVED' | 'REJECTED',
+    choiceId?: string,
+    responseText?: string,
+  ): boolean {
+    const resolvedChoiceId = choiceId ?? (resolution === 'APPROVED' ? 'approve' : 'reject');
     const action = useSentinelStore.getState().pendingActions.find((item) => item.id === interruptId);
     const activeConversationId = this.ws.getActiveConversationId();
     if (!action || (action.conversation_id && action.conversation_id !== activeConversationId)) {
       console.warn('[SentinelClient] Refusing to resolve an interrupt outside the active conversation');
-      return;
+      return false;
     }
-    if (useSentinelStore.getState().resolvingInterruptIds[interruptId]) return;
+    if (useSentinelStore.getState().resolvingInterruptIds[interruptId]) return false;
 
-    if (!this.ws.resolveInterrupt(interruptId, resolution)) {
+    if (!this.ws.resolveInterrupt(interruptId, resolution, resolvedChoiceId, responseText)) {
       console.warn('[SentinelClient] Interrupt resolution was not accepted by the realtime transport');
-      return;
+      return false;
     }
     this.resolvingInterruptId = interruptId;
     useSentinelStore.getState().markInterruptResolving(interruptId);
+    return true;
   }
 
   /** Update a deployed rule through the authenticated API. */
@@ -404,6 +509,11 @@ export class SentinelClient {
     const generation = ++this.dashboardSyncGeneration;
     this.dashboardSyncController?.abort();
     const controller = new AbortController();
+    // Preserve interrupts received over WebSocket while this HTTP snapshot is
+    // in flight. An older empty response must not erase a newly-arrived card.
+    const pendingActionIdsAtStart = new Set(
+      useSentinelStore.getState().pendingActions.map((action) => action.id),
+    );
     this.dashboardSyncController = controller;
     useSentinelStore.getState().setDashboardRefreshState('REFRESHING');
 
@@ -429,7 +539,17 @@ export class SentinelClient {
         useSentinelStore.getState().setRules(rulesRes.value.rules);
       }
       if (interruptsRes.status === 'fulfilled') {
-        useSentinelStore.getState().setPendingActions(interruptsRes.value.interrupts);
+        const currentPending = useSentinelStore.getState().pendingActions;
+        const realtimeArrivals = currentPending.filter(
+          (action) => !pendingActionIdsAtStart.has(action.id),
+        );
+        const merged = [
+          ...interruptsRes.value.interrupts,
+          ...realtimeArrivals.filter(
+            (action) => !interruptsRes.value.interrupts.some((item) => item.id === action.id),
+          ),
+        ];
+        useSentinelStore.getState().setPendingActions(merged);
       }
       if (alertsRes.status === 'fulfilled') {
         useSentinelStore.getState().setAlerts(alertsRes.value.alerts);
@@ -501,6 +621,7 @@ export class SentinelClient {
     this.dashboardSyncController = null;
     this.resolvingInterruptId = null;
     this.statusRequestInFlight = false;
+    useSentinelStore.getState().setStatusRequestInFlight(false);
     this.connectedConversationIds.clear();
     if (this.historyRevalidationTimer) {
       clearTimeout(this.historyRevalidationTimer);
@@ -523,10 +644,6 @@ export class SentinelClient {
     }
     this.unsubscribers = [];
   }
-}
-
-function isCancellation(error: unknown): boolean {
-  return error instanceof HttpError && error.statusCode === 499;
 }
 
 export const sentinelClient = new SentinelClient();

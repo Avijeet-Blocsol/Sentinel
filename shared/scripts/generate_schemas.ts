@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS agent_conversations (
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     title TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'ARCHIVED', 'SYNTHESIZED')),
-    phase TEXT NOT NULL DEFAULT 'DISCOVERY' CHECK (phase IN ('DISCOVERY', 'AWAITING_QUERY_CONFIRMATION', 'SCOUTING', 'INTERRUPT_PENDING', 'DEPLOYED')),
+    phase TEXT NOT NULL DEFAULT 'DISCOVERY' CHECK (phase IN ('DISCOVERY', 'AWAITING_QUERY_CONFIRMATION', 'SCOUTING', 'AWAITING_TRIGGER_MODE', 'CLARIFICATION_PENDING', 'INTERRUPT_PENDING', 'DEPLOYED')),
     created_at INTEGER NOT NULL
 );
 
@@ -190,7 +190,8 @@ CREATE TABLE IF NOT EXISTS alert_events (
 CREATE TABLE IF NOT EXISTS interrupt_actions (
     id TEXT PRIMARY KEY,
     alert_id TEXT REFERENCES alert_events(id) ON DELETE CASCADE,
-    rule_id TEXT NOT NULL REFERENCES rules(id) ON DELETE CASCADE,
+    rule_id TEXT REFERENCES rules(id) ON DELETE CASCADE,
+    conversation_id TEXT REFERENCES agent_conversations(id) ON DELETE CASCADE,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     action_type TEXT NOT NULL,
     action_payload TEXT NOT NULL,
@@ -255,6 +256,9 @@ const fileMap: Partial<Record<keyof typeof ALL_SCHEMAS, string>> = {
   AlertEvent: 'alert_event.schema.json',
   InterruptAction: 'interrupt_action.schema.json',
   EnrichedInterruptAction: 'enriched_interrupt_action.schema.json',
+  ChoiceInterruptPayload: 'choice_interrupt_payload.schema.json',
+  ClarificationChoice: 'clarification_choice.schema.json',
+  ClarificationRequestPayload: 'clarification_request_payload.schema.json',
   FinancialThreshold: 'financial_threshold.schema.json',
   EcommerceThreshold: 'ecommerce_threshold.schema.json',
   WebObserverThreshold: 'web_observer_threshold.schema.json',

@@ -13,7 +13,6 @@ export async function registerForPushNotificationsAsync(): Promise<{
       name: 'Sentinel alerts',
       importance: Notifications.AndroidImportance.MAX,
       vibrationPattern: [0, 250, 250, 250],
-      sound: 'default',
     });
   }
 

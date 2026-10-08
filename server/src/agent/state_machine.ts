@@ -9,15 +9,19 @@ export type ConversationPhase =
   | 'DISCOVERY'
   | 'AWAITING_QUERY_CONFIRMATION'
   | 'SCOUTING'
+  | 'AWAITING_TRIGGER_MODE'
+  | 'CLARIFICATION_PENDING'
   | 'INTERRUPT_PENDING'
   | 'DEPLOYED';
 
 export type UserInputCategory =
   | 'TASK_STATUS_INQUIRY'
+  | 'CONVERSATION_HISTORY_INQUIRY'
   | 'INTERRUPT_RESOLUTION'
   | 'TASK_MODIFICATION_ATTEMPT'
   | 'SENTINEL_INTENT'
-  | 'OFF_TOPIC_BS';
+  | 'OFF_TOPIC_BS'
+  | 'AI_UNAVAILABLE';
 
 export interface ConversationStateContext {
   phase: ConversationPhase;
@@ -29,95 +33,49 @@ export interface ConversationStateContext {
 }
 
 /**
- * Checks if text is an explicit natural-language resolution to a pending interrupt.
+ * Compatibility stub. Interrupts are resolved only through typed choice-card
+ * actions, never by interpreting free-form text.
  */
 export function isInterruptResolutionText(text: string): {
   isResolution: boolean;
   resolution?: 'APPROVED' | 'REJECTED';
 } {
-  const normalized = text.trim().toLowerCase();
-
-  const approvalPatterns = [
-    /^(confirm|approve|deploy|confirm\s*&\s*deploy|looks\s*good|proceed|go\s*ahead|yes|lgtm|accept|do\s*it|ready)$/i,
-    /^i\s*(confirm|approve|accept|agree)$/i,
-    /^(yes,?\s*confirm|yes,?\s*deploy|yes,?\s*proceed)$/i,
-  ];
-
-  const rejectionPatterns = [
-    /^(reject|cancel|dismiss|no|stop|discard|abort|nevermind|don't\s*deploy)$/i,
-    /^i\s*(reject|cancel|dismiss)$/i,
-    /^(no,?\s*cancel|no,?\s*stop)$/i,
-  ];
-
-  for (const pattern of approvalPatterns) {
-    if (pattern.test(normalized)) {
-      return { isResolution: true, resolution: 'APPROVED' };
-    }
-  }
-
-  for (const pattern of rejectionPatterns) {
-    if (pattern.test(normalized)) {
-      return { isResolution: true, resolution: 'REJECTED' };
-    }
-  }
-
+  // Interrupts are resolved exclusively by persisted choice-card actions.
+  // Free-form text must never become an implicit approval or rejection.
   return { isResolution: false };
 }
 
-/**
- * Query confirmation is deliberately stricter than ordinary conversation.
- * This is used by the deterministic router before any scouting tool can run.
- */
+/** Deprecated text-resolution compatibility stub; card actions are authoritative. */
 export function isQueryConfirmationText(text: string): boolean {
-  const resolution = isInterruptResolutionText(text);
-  return resolution.isResolution && resolution.resolution === 'APPROVED';
+  return false;
 }
 
-/** A negative answer at the pre-scout review cancels the draft safely. */
+/** Deprecated text-resolution compatibility stub; card actions are authoritative. */
 export function isQueryRejectionText(text: string): boolean {
-  const resolution = isInterruptResolutionText(text);
-  return resolution.isResolution && resolution.resolution === 'REJECTED';
+  return false;
 }
 
-/**
- * Checks if user input is asking about task execution history, status, or progress.
- */
+/** Deprecated semantic compatibility stub; use the Strands intent classifier. */
 export function isTaskStatusInquiry(text: string): boolean {
-  const normalized = text.trim().toLowerCase();
-  const statusPatterns = [
-    /status/i,
-    /what('?s|\s+is)\s+happening/i,
-    /how('?s|\s+is)\s+(the|my)?\s*(task|watcher|sentinel|monitoring)\s*(going|doing)?/i,
-    /what\s+has\s+happened/i,
-    /summary\s+of\s+what\s+has\s+happened/i,
-    /did\s+(it|the\s+watcher)\s+trigger/i,
-    /is\s+(it|the\s+watcher|sentinel)\s+running/i,
-    /show\s+(me\s+)?(the\s+)?(progress|history|execution|logs)/i,
-    /current\s+execution\s+stack/i,
-    /what\s+did\s+you\s+find/i,
-  ];
-
-  return statusPatterns.some((p) => p.test(normalized));
+  return false;
 }
 
-/**
- * Checks if user is attempting to modify or add tasks after the scout phase has locked the intent.
- */
-export function isTaskModificationAttempt(text: string): boolean {
-  const normalized = text.trim().toLowerCase();
-  const modPatterns = [
-    /\b(change|update|modify|alter|edit|set|use)\s+(the\s+)?(price|threshold|condition|ticker|symbol|rule|source|cadence|frequency|interval|tone|sound|alert)/i,
-    /\balso\s+(monitor|watch|track|check)/i,
-    /\binstead\s+(of|monitor|watch|track)/i,
-    /\b(add|remove|drop|exclude|include)\s+(another\s+|the\s+)?(condition|ticker|stock|rule|sentinel|source|channel|feed|website|alert)/i,
-    /\bmake\s+it\s+(above|below|different)/i,
-    /\bswitch\s+(to|the)\s/i,
-    /\bcan\s+you\s+(change|update|modify|also|add|switch)/i,
-    /\b(every|once\s+every)\s+\d+\s*(second|minute|hour|day)s?\b/i,
-    /\b(only|don'?t)\s+(alert|notify|monitor|watch|track)\b/i,
-  ];
+/** Deprecated semantic compatibility stub; use the Strands intent classifier. */
+export function isConversationHistoryInquiry(text: string): boolean {
+  return false;
+}
 
-  return modPatterns.some((p) => p.test(normalized));
+/** Deprecated semantic compatibility stub; use the Strands intent classifier. */
+export function isTaskContextQuestion(
+  text: string,
+  context?: Pick<ConversationStateContext, 'phase' | 'activeRule'>
+): boolean {
+  return false;
+}
+
+/** Deprecated semantic compatibility stub; use the Strands intent classifier. */
+export function isTaskModificationAttempt(text: string): boolean {
+  return false;
 }
 
 /**
@@ -127,48 +85,9 @@ export function classifyUserInput(
   text: string,
   context: ConversationStateContext
 ): UserInputCategory {
-  // If there's a pending interrupt, resolution check takes top priority
-  if (context.pendingInterrupt) {
-    const res = isInterruptResolutionText(text);
-    if (res.isResolution) return 'INTERRUPT_RESOLUTION';
-  }
-
-  if (isTaskStatusInquiry(text)) {
-    return 'TASK_STATUS_INQUIRY';
-  }
-
-  // Edits are valid during the explicit review phase and are rejected after
-  // scouting starts. Classify both cases accurately so the phase handler can
-  // decide whether to redraft or return the locked-scope response.
-  if (
-    context.phase === 'AWAITING_QUERY_CONFIRMATION' ||
-    context.phase === 'SCOUTING' ||
-    context.phase === 'INTERRUPT_PENDING' ||
-    context.phase === 'DEPLOYED'
-  ) {
-    if (isTaskModificationAttempt(text)) {
-      return 'TASK_MODIFICATION_ATTEMPT';
-    }
-  }
-
-  // Check for surveillance / monitoring keywords
-  // Require co-occurrence: monitoring verb + domain entity, or explicit conditional phrases
-  const sentinelPatterns = [
-    /\b(watch|monitor|track|alert|notify|observe)\b.*\b(stock|ticker|price|crypto|bitcoin|btc|eth|market|polymarket|prediction|rss|feed|website|url|page|site|product|listing|telegram|channel|news|keyword|event)\b/i,
-    /\b(stock|ticker|price|crypto|bitcoin|btc|eth|market|polymarket|prediction|rss|feed|website|url|page|site|product|listing|telegram|channel|news|keyword|event)\b.*\b(watch|monitor|track|alert|notify|observe)\b/i,
-    /\bif\s+.+\s+(drops|rises|breaks|hits|falls|reaches|goes\s+(above|below)|exceeds|crosses)\b/i,
-    /\b(sentinel|watcher)\b/i,
-    /\balert\s+me\b/i,
-    /\bnotify\s+me\b/i,
-    /\bwatch\s+for\b/i,
-    /\bkeep\s+(an\s+)?eye\s+on\b/i,
-  ];
-
-  if (sentinelPatterns.some((p) => p.test(text))) {
-    return 'SENTINEL_INTENT';
-  }
-
-  return 'OFF_TOPIC_BS';
+  // This synchronous compatibility API cannot perform semantic intent
+  // classification. The live workflow must use classifyUserInputWithAgent.
+  return 'AI_UNAVAILABLE';
 }
 
 /**
@@ -185,14 +104,21 @@ export function generateSteeringResponse(context: ConversationStateContext): str
   if (context.phase === 'INTERRUPT_PENDING' && context.pendingInterrupt) {
     return (
       `⚠️ **Action Required**: Sentinel is currently awaiting your decision on the confirmation card above. ` +
-      `Please tap **Confirm & Deploy** or **Dismiss** (or type "confirm" / "cancel") before proceeding.`
+      `Please tap one of the choices on the card before proceeding.`
     );
   }
 
   if (context.phase === 'SCOUTING') {
     return (
       `I am currently running reconnaissance and live pre-flight verification on your task. ` +
-      `This task is locked. Once the verification card is presented, you'll be able to confirm and deploy it.`
+      `This task is locked. Once verification completes, you'll choose continuous monitoring or a one-time alert to deploy it.`
+    );
+  }
+
+  if (context.phase === 'AWAITING_TRIGGER_MODE') {
+    return (
+      `The task passed live pre-flight verification. Choose **continuous monitoring** to keep watching for future matches, ` +
+      `or **one-time alert** to stop after the first alert. Your choice confirms deployment.`
     );
   }
 
@@ -204,15 +130,30 @@ export function generateSteeringResponse(context: ConversationStateContext): str
 }
 
 /**
- * A deterministic response for text received after reconnaissance starts.
- * It deliberately never offers in-place task edits: those would invalidate
- * the pre-flight evidence and the approval boundary.
+ * A deterministic response for text received while a lifecycle gate is
+ * active. Deployed-task edits are handled by the semantic task-edit agent
+ * before this fallback is reached.
  */
-export function generateLockedScopeResponse(phase: Extract<ConversationPhase, 'SCOUTING' | 'INTERRUPT_PENDING' | 'DEPLOYED'>): string {
+export function generateLockedScopeResponse(phase: Extract<ConversationPhase, 'SCOUTING' | 'AWAITING_TRIGGER_MODE' | 'INTERRUPT_PENDING' | 'DEPLOYED'>): string {
+  if (phase === 'AWAITING_TRIGGER_MODE') {
+    return (
+      `✅ **Pre-flight verification complete**\n\n` +
+      `Choose **continuous monitoring** to keep watching, or **one-time alert** to finish after the first alert. ` +
+      `Your lifecycle choice confirms deployment.`
+    );
+  }
+  if (phase === 'DEPLOYED') {
+    return (
+      `The Sentinel task is deployed. You can ask me to remove a condition, ` +
+      `change a condition's schedule or trigger, or switch between one-time ` +
+      `alerting and continuous monitoring. I will prepare a change card for ` +
+      `you to review before anything is updated.`
+    );
+  }
   return (
     `⚠️ **Task Scope Locked**\n\n` +
-    `This Sentinel Task is already locked and ${phase === 'DEPLOYED' ? 'actively monitoring in the background' : 'executing live reconnaissance'}. ` +
-    `We do not modify active tasks mid-flight. Ask for a status update, resolve the pending confirmation, or create a new Sentinel Task.`
+    `This Sentinel Task is locked while live reconnaissance is in progress; do not modify active tasks mid-flight. ` +
+    `Ask for a status update or resolve the pending confirmation card before continuing.`
   );
 }
 
@@ -249,6 +190,41 @@ export function generateTaskStatusSummary(context: ConversationStateContext): st
 
   if (context.lastTelemetrySummary) {
     parts.push(`\n**Recent Telemetry:**\n${context.lastTelemetrySummary}`);
+  }
+
+  return parts.join('\n');
+}
+
+/**
+ * Produces a faithful recap from durable conversation messages. The stored
+ * transcript is the source of truth; this helper does not invent facts or run
+ * a second model pass.
+ */
+export function generateConversationHistorySummary(context: ConversationStateContext): string {
+  const parts: string[] = ['🧾 **Conversation Summary**'];
+
+  if (context.activeRule) {
+    parts.push(`• **Current task**: ${context.activeRule.title}`);
+    parts.push(`• **Lifecycle phase**: \`${context.phase}\``);
+  } else {
+    parts.push(`• **Lifecycle phase**: \`${context.phase}\``);
+  }
+
+  const messages = (context.recentMessages ?? []).slice(-8);
+  if (messages.length === 0) {
+    parts.push('\nThere are no earlier messages recorded for this conversation yet.');
+    return parts.join('\n');
+  }
+
+  parts.push('\n**Recent discussion:**');
+  for (const message of messages) {
+    const speaker = message.role === 'user' ? 'You' : 'Sentinel';
+    const content = message.content.replace(/\s+/g, ' ').trim().slice(0, 320);
+    if (content) parts.push(`• **${speaker}**: ${content}`);
+  }
+
+  if (context.pendingInterrupt) {
+    parts.push('\n⚠️ A confirmation interrupt is currently waiting for your decision.');
   }
 
   return parts.join('\n');

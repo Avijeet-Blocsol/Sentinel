@@ -15,6 +15,7 @@ import {
   type InterruptResolvedEvent,
   type InterruptRequiredEvent,
   type AlertTriggeredEvent,
+  type SubSentinelEvaluatedEvent,
   type WsErrorMessage,
 } from '@sentinel/shared';
 import { getWsBaseUrl, API_CONFIG } from './api_config';
@@ -29,6 +30,8 @@ export type WsEventMap = {
   INTERRUPT_RESOLVED: InterruptResolvedEvent;
   INTERRUPT_REQUIRED: InterruptRequiredEvent;
   ALERT_TRIGGERED: AlertTriggeredEvent;
+  SUB_SENTINEL_EVALUATED: SubSentinelEvaluatedEvent;
+  SENTRY_EVALUATED: SubSentinelEvaluatedEvent;
   ERROR: WsErrorMessage;
 };
 
@@ -199,9 +202,12 @@ export class WsAdapter {
       ws.onopen = () => {
         if (this.socket !== ws || generation !== this.connectionGeneration || this.suspended) return;
         this.reconnectAttempts = 0;
-        this.setStatus('CONNECTED');
         this.startHeartbeat();
+        // Put accepted offline input on the wire before CONNECTED listeners
+        // start durable-history revalidation. This narrows the race where an
+        // older HTTP snapshot could temporarily replace an optimistic turn.
         this.flushOutgoingQueue();
+        this.setStatus('CONNECTED');
       };
 
       ws.onmessage = (event: any) => {
@@ -210,7 +216,11 @@ export class WsAdapter {
       };
 
       ws.onerror = (event: any) => {
-        if (this.socket !== ws || generation !== this.connectionGeneration) return;
+        if (
+          this.socket !== ws ||
+          generation !== this.connectionGeneration ||
+          this.intentionalDisconnect
+        ) return;
         console.warn('[WsAdapter] Socket encountered error:', event?.message || event);
       };
 
@@ -228,7 +238,6 @@ export class WsAdapter {
     } catch (err) {
       if (generation !== this.connectionGeneration || this.suspended || this.intentionalDisconnect) return;
       console.error('[WsAdapter] Failed to initiate connection:', err);
-      this.outgoingQueue = this.outgoingQueue.filter((item) => item.conversationId !== conversationId);
       this.setStatus('DISCONNECTED');
       this.emit('ERROR', {
         type: 'ERROR',
@@ -298,11 +307,19 @@ export class WsAdapter {
    */
   public resolveInterrupt(
     interruptId: string,
-    resolution: 'APPROVED' | 'REJECTED'
+    resolution: 'APPROVED' | 'REJECTED',
+    choiceId?: string,
+    responseText?: string,
   ): boolean {
+    const resolvedChoiceId = choiceId ?? (resolution === 'APPROVED' ? 'approve' : 'reject');
     const message: WsClientMessage = {
       type: 'RESOLVE_INTERRUPT',
-      payload: { interruptId, resolution },
+      payload: {
+        interruptId,
+        resolution,
+        choiceId: resolvedChoiceId,
+        ...(responseText?.trim() ? { responseText: responseText.trim() } : {}),
+      },
     };
 
     return this.activeConversationId
@@ -347,6 +364,21 @@ export class WsAdapter {
   }
 
   private queueOutgoingMessage(item: { conversationId: string; message: WsClientMessage }): boolean {
+    // A reconnect may replay the same card action from more than one UI
+    // callback. Keep only the latest resolution for each interrupt; the
+    // server also treats the interrupt id as an idempotency key.
+    if (item.message.type === 'RESOLVE_INTERRUPT') {
+      const interruptId = item.message.payload.interruptId;
+      const existingIndex = this.outgoingQueue.findIndex((queued) =>
+        queued.conversationId === item.conversationId &&
+        queued.message.type === 'RESOLVE_INTERRUPT' &&
+        (queued.message as Extract<WsClientMessage, { type: 'RESOLVE_INTERRUPT' }>).payload.interruptId === interruptId,
+      );
+      if (existingIndex >= 0) {
+        this.outgoingQueue[existingIndex] = item;
+        return true;
+      }
+    }
     if (this.outgoingQueue.length >= this.maxQueuedMessages) {
       console.warn('[WsAdapter] Outgoing queue is full; refusing to enqueue another message.');
       return false;
@@ -360,11 +392,18 @@ export class WsAdapter {
 
     const queued = this.outgoingQueue;
     this.outgoingQueue = [];
+    const flushedResolutionIds = new Set<string>();
     for (let index = 0; index < queued.length; index += 1) {
       const queuedItem = queued[index];
       if (queuedItem.conversationId !== this.activeConversationId) {
         this.outgoingQueue.push(queuedItem);
         continue;
+      }
+
+      if (queuedItem.message.type === 'RESOLVE_INTERRUPT') {
+        const resolutionKey = `${queuedItem.conversationId}:${queuedItem.message.payload.interruptId}`;
+        if (flushedResolutionIds.has(resolutionKey)) continue;
+        flushedResolutionIds.add(resolutionKey);
       }
 
       try {
